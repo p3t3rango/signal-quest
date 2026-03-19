@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Signal Quest: Color Edition</title>
+  <link rel="stylesheet" href="/styles.css">
+  <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+</head>
+<body>
+  <div id="game-wrapper">
+    <!-- Top bar -->
+    <div id="top-bar">
+      <span id="logo">SIGNAL QUEST <span class="accent">COLOR</span></span>
+      <span id="cam-status">CAM: WAITING...</span>
+    </div>
+
+    <!-- Main game area -->
+    <div id="main-area">
+      <!-- Game canvas (left/center) -->
+      <div id="canvas-frame">
+        <canvas id="game-canvas"></canvas>
+      </div>
+
+      <!-- Side panel (webcam + info) -->
+      <div id="side-panel">
+        <div id="webcam-container">
+          <div id="webcam-label">WEBCAM FEED</div>
+          <canvas id="webcam-display"></canvas>
+          <div id="hand-status">Show your hand to the camera</div>
+        </div>
+        <div id="info-panel">
+          <div id="controls-info">
+            <div class="control-row"><span class="key">ARROWS</span> Move</div>
+            <div class="control-row"><span class="key">Z</span> Confirm / A</div>
+            <div class="control-row"><span class="key">X</span> Back / B</div>
+            <div class="control-row"><span class="key">ENTER</span> Start</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Bottom bar -->
+    <div id="bottom-bar">
+      <span>ASL Learning Game</span>
+      <span id="fps-counter"></span>
+    </div>
+  </div>
+
+  <video id="webcam-video" autoplay playsinline></video>
+  <canvas id="webcam-process" width="640" height="480"></canvas>
+
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>
