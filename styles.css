@@ -194,6 +194,127 @@ body {
   flex-shrink: 0;
 }
 
+/* ─── Touch Controls Overlay ─── */
+#touch-controls {
+  display: none;
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 160px;
+  padding: 10px 20px 20px;
+  justify-content: space-between;
+  align-items: flex-end;
+  z-index: 1000;
+  pointer-events: none;
+  background: linear-gradient(to top, rgba(10, 10, 20, 0.85) 0%, transparent 100%);
+}
+
+/* D-Pad */
+#touch-dpad {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  pointer-events: auto;
+}
+
+.dpad-middle-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.dpad-center {
+  width: 48px;
+  height: 48px;
+  background: #1a2a1a;
+  border-radius: 4px;
+}
+
+.dpad-btn {
+  width: 52px;
+  height: 52px;
+  background: rgba(52, 104, 86, 0.75);
+  border: 2px solid #88c070;
+  border-radius: 8px;
+  color: #e0f8d0;
+  font-size: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.dpad-btn:active {
+  background: rgba(136, 192, 112, 0.8);
+  border-color: #e0f8d0;
+  box-shadow: 0 0 10px rgba(136, 192, 112, 0.5);
+}
+
+/* A and B Buttons */
+#touch-buttons {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  pointer-events: auto;
+}
+
+.action-btn {
+  width: 60px;
+  height: 60px;
+  border-radius: 50%;
+  font-family: 'Press Start 2P', monospace;
+  font-size: 14px;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+  user-select: none;
+  -webkit-user-select: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+#btn-a {
+  background: rgba(136, 192, 112, 0.75);
+  border: 3px solid #88c070;
+  color: #0a0a14;
+  box-shadow: 0 0 8px rgba(136, 192, 112, 0.3);
+}
+
+#btn-a:active {
+  background: rgba(136, 192, 112, 1);
+  box-shadow: 0 0 16px rgba(136, 192, 112, 0.6);
+}
+
+#btn-b {
+  background: rgba(224, 80, 80, 0.55);
+  border: 3px solid #e05050;
+  color: #e0f8d0;
+  box-shadow: 0 0 8px rgba(224, 80, 80, 0.2);
+}
+
+#btn-b:active {
+  background: rgba(224, 80, 80, 0.85);
+  box-shadow: 0 0 16px rgba(224, 80, 80, 0.5);
+}
+
+/* Position B lower, A higher (GameBoy diamond layout) */
+#btn-b {
+  align-self: flex-end;
+  margin-bottom: 0;
+}
+
+#btn-a {
+  align-self: flex-start;
+  margin-bottom: 20px;
+}
+
 /* ─── Responsive ─── */
 @media (max-width: 700px) {
   #main-area {
@@ -203,14 +324,18 @@ body {
   #canvas-frame {
     border-right: none;
     border-bottom: 3px solid #346856;
-    min-height: 50vh;
+    min-height: 0;
+    flex: 1;
   }
 
   #game-canvas {
     max-width: 100%;
     max-height: 100%;
-    width: auto;
+    width: 100%;
     height: auto;
+    aspect-ratio: 160 / 144;
+    object-fit: contain;
+    border: 2px solid #1a2a1a;
   }
 
   #side-panel {
@@ -225,5 +350,28 @@ body {
 
   #info-panel {
     flex: 1;
+  }
+
+  body {
+    overflow: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  #game-wrapper {
+    height: auto;
+    min-height: 100vh;
+    padding-bottom: 170px;
+  }
+}
+
+/* Show touch controls on devices that support touch (coarse pointer = finger) */
+@media (pointer: coarse) {
+  #touch-controls {
+    display: flex;
+  }
+
+  /* Hide keyboard controls info on touch devices */
+  #controls-info {
+    display: none;
   }
 }

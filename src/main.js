@@ -8,11 +8,22 @@ import {
   NPC_SENSEI, GATE_LOCKED, SIGN_POST, TREE, HOUSE, CHECKPOINT,
   BADGE_ICON, TILES, TILE_COLORS
 } from './sprites.js';
-import { drawHandSign, drawGhostHand, getOrientation, getHandSide } from './handdraw.js';
+import { getOrientation, getHandSide } from './handdraw.js';
 
 // ─── Setup ─────────────────────────────────────────────
 const canvas = document.getElementById('game-canvas');
 const R = new Renderer(canvas);
+
+// ─── Preload ASL reference SVGs (public domain, Wikimedia Commons) ───
+const signImages = {};
+const SIGN_LETTERS = ['A','B','C','D','F','I','K','L','O','R','U','V','W','Y'];
+let signImagesLoaded = 0;
+SIGN_LETTERS.forEach(letter => {
+  const img = new Image();
+  img.onload = () => { signImagesLoaded++; };
+  img.src = `/signs/${letter}.svg`;
+  signImages[letter] = img;
+});
 const videoEl = document.getElementById('webcam-video');
 const processCanvas = document.getElementById('webcam-process');
 processCanvas.width = R.canvas.width;
@@ -36,14 +47,89 @@ document.addEventListener('keydown', e => {
 });
 document.addEventListener('keyup', e => { keys[e.key] = false; });
 
-// No physical button UI — keyboard only
-
 function isJustPressed(key) {
   return justPressed[key];
 }
 
 function clearJustPressed() {
   for (const k in justPressed) justPressed[k] = false;
+}
+
+// ─── Touch Controls ───────────────────────────────────
+function initTouchControls() {
+  const touchMap = {
+    'dpad-up':    'ArrowUp',
+    'dpad-down':  'ArrowDown',
+    'dpad-left':  'ArrowLeft',
+    'dpad-right': 'ArrowRight',
+    'btn-a':      'z',
+    'btn-b':      'x',
+  };
+
+  // Also detect touch capability via JS and force-show the overlay
+  const hasTouchScreen = ('ontouchstart' in window) || (navigator.maxTouchPoints > 0);
+  if (hasTouchScreen) {
+    const overlay = document.getElementById('touch-controls');
+    if (overlay) overlay.style.display = 'flex';
+  }
+
+  Object.entries(touchMap).forEach(([btnId, keyName]) => {
+    const btn = document.getElementById(btnId);
+    if (!btn) return;
+
+    btn.addEventListener('touchstart', e => {
+      e.preventDefault();
+      if (!keys[keyName]) justPressed[keyName] = true;
+      keys[keyName] = true;
+    }, { passive: false });
+
+    btn.addEventListener('touchend', e => {
+      e.preventDefault();
+      keys[keyName] = false;
+    }, { passive: false });
+
+    btn.addEventListener('touchcancel', e => {
+      keys[keyName] = false;
+    });
+
+    // Prevent context menu on long press
+    btn.addEventListener('contextmenu', e => e.preventDefault());
+  });
+
+  // Prevent default touch behaviors on the game canvas (scrolling, zooming)
+  canvas.addEventListener('touchstart', e => e.preventDefault(), { passive: false });
+  canvas.addEventListener('touchmove', e => e.preventDefault(), { passive: false });
+}
+
+// ─── Responsive Canvas ────────────────────────────────
+function initResponsiveCanvas() {
+  function resizeCanvas() {
+    const frame = document.getElementById('canvas-frame');
+    if (!frame) return;
+    const frameW = frame.clientWidth;
+    const frameH = frame.clientHeight;
+    // Game aspect ratio is 160:144
+    const gameAspect = 160 / 144;
+    let displayW, displayH;
+    if (frameW / frameH > gameAspect) {
+      // Frame is wider than game — fit to height
+      displayH = frameH;
+      displayW = frameH * gameAspect;
+    } else {
+      // Frame is taller than game — fit to width
+      displayW = frameW;
+      displayH = frameW / gameAspect;
+    }
+    canvas.style.width = Math.floor(displayW) + 'px';
+    canvas.style.height = Math.floor(displayH) + 'px';
+  }
+
+  window.addEventListener('resize', resizeCanvas);
+  // Also handle orientation change on mobile
+  window.addEventListener('orientationchange', () => {
+    setTimeout(resizeCanvas, 100);
+  });
+  resizeCanvas();
 }
 
 // ─── Webcam ────────────────────────────────────────────
@@ -363,6 +449,21 @@ function initOverworld() {
     open: State.isZoneComplete(zone.id),
   });
 
+  // If auto-advancing from challenge complete, position player near next uncompleted NPC
+  if (sceneData.autoAdvance) {
+    const nextNPC = overworldNPCs.find(npc => !npc.completed && npc.active);
+    if (nextNPC) {
+      playerX = nextNPC.x;
+      playerY = nextNPC.y + 20;
+      playerDir = 'up';
+    } else if (overworldGates[0] && overworldGates[0].open) {
+      // All NPCs done, position near gate
+      playerX = overworldGates[0].x;
+      playerY = overworldGates[0].y + 20;
+      playerDir = 'up';
+    }
+  }
+
   playBGM('overworld');
 }
 
@@ -494,10 +595,32 @@ function drawOverworld() {
     }
   });
 
+  // Find the next target NPC (first uncompleted active NPC)
+  const nextTargetIdx = overworldNPCs.findIndex(npc => !npc.completed && npc.active);
+
   // Draw NPCs
   overworldNPCs.forEach((npc, i) => {
     const bounce = Math.sin(walkTimer / 300 + i) * 2;
     const isNear = (i === currentNPCIndex);
+    const isNextTarget = (i === nextTargetIdx);
+
+    // Pulsing beacon for next target NPC (visible from anywhere)
+    if (isNextTarget && !npc.completed) {
+      const pulseRadius = 14 + Math.sin(walkTimer / 150) * 4;
+      const pulseAlpha = 0.3 + Math.sin(walkTimer / 200) * 0.2;
+      // Outer glow ring
+      R.ctx.strokeStyle = '#ebcb8b';
+      R.ctx.lineWidth = R.scale * 2;
+      R.ctx.globalAlpha = pulseAlpha;
+      R.ctx.beginPath();
+      R.ctx.arc(R.px(npc.x), R.px(npc.y), R.px(pulseRadius), 0, Math.PI * 2);
+      R.ctx.stroke();
+      R.ctx.globalAlpha = 1;
+
+      // Small arrow indicator above the NPC
+      const arrowBob = Math.sin(walkTimer / 180) * 3;
+      R.textColor('\u25BC', npc.x - 2, npc.y - 20 + arrowBob, '#ebcb8b', 6);
+    }
 
     // Highlight ring when player is nearby
     if (isNear) {
@@ -511,11 +634,21 @@ function drawOverworld() {
       R.ctx.globalAlpha = 1;
     }
 
-    R.sprite(NPC_SENSEI, npc.x - 4, npc.y - 4 + bounce, 1);
+    // Flash effect for next target NPC sprite
+    if (isNextTarget && !npc.completed) {
+      const flashOn = Math.floor(walkTimer / 500) % 3 !== 0; // on 2/3 of the time
+      if (flashOn) {
+        R.sprite(NPC_SENSEI, npc.x - 4, npc.y - 4 + bounce, 1);
+      } else {
+        R.sprite(NPC_SENSEI, npc.x - 4, npc.y - 4 + bounce, 3); // brighter palette
+      }
+    } else {
+      R.sprite(NPC_SENSEI, npc.x - 4, npc.y - 4 + bounce, 1);
+    }
 
     // Letter label above NPC
     if (npc.completed) {
-      R.textColor('✓', npc.x - 1, npc.y - 12 + bounce, '#88c070', 8);
+      R.textColor('\u2713', npc.x - 1, npc.y - 12 + bounce, '#88c070', 8);
     } else if (npc.active) {
       R.textColor(npc.letter, npc.x - 2, npc.y - 12 + bounce, '#e0f8d0', 8);
     } else {
@@ -543,8 +676,27 @@ function drawOverworld() {
   // Hearts
   R.hearts(4, R.height - 12, State.getState().hearts, State.getState().maxHearts);
 
+  // Dynamic hint bar at bottom
+  const allNPCsDone = overworldNPCs.every(npc => npc.completed);
+  const nextNPC = overworldNPCs.find(npc => !npc.completed && npc.active);
+  const hintPulse = Math.floor(walkTimer / 600) % 2;
+
+  R.rect(0, R.height - 20, R.width, 8, 0);
+  if (allNPCsDone && overworldGates[0]) {
+    // All signs done - direct to gate
+    if (hintPulse) {
+      R.textColor('ALL SIGNS DONE \u2192 GO TO GATE', R.width / 2, R.height - 19, '#ebcb8b', 6, 'center');
+    } else {
+      R.textColor('ALL SIGNS DONE \u2192 GO TO GATE', R.width / 2, R.height - 19, '#88c070', 6, 'center');
+    }
+  } else if (nextNPC) {
+    // Show which NPC to talk to
+    const hintColor = hintPulse ? '#ebcb8b' : '#e0f8d0';
+    R.textColor(`TALK TO '${nextNPC.letter}' \u2192 Z`, R.width / 2, R.height - 19, hintColor, 6, 'center');
+  }
+
   // Controls hint
-  R.text('A:TALK B:MAP', R.width - 4, R.height - 8, 1, 6, 'right');
+  R.text('X:MAP', R.width - 4, R.height - 8, 1, 6, 'right');
 
   // Message box
   if (overworldMessage) {
@@ -657,7 +809,17 @@ function updateBattle(dt) {
     case 'success':
       if (battleTimer > 2500 || isJustPressed('z') || isJustPressed('Enter')) {
         stopBGM();
-        switchScene('overworld');
+        // Check if all signs in zone are now complete
+        const zone = State.getCurrentZone();
+        const allDone = zone.letters.every(l => State.getState().completedSigns.includes(l));
+        if (allDone && !State.isZoneComplete(zone.id)) {
+          // Earn badge and go to zone complete screen
+          State.earnBadge(zone.id);
+          SFX.badge();
+          switchScene('zonecomplete', { zone });
+        } else {
+          switchScene('challengecomplete', { letter: battleLetter, npcIndex: battleNpcIndex });
+        }
       }
       break;
 
@@ -721,15 +883,27 @@ function drawBattle() {
 
       R.text(`SIGN '${battleLetter}'`, R.width / 2, 24, 3, 8, 'center');
 
-      // Draw high-fidelity hand using canvas paths (centered, large)
-      const handSize = 240; // pixel size of the hand drawing
-      const handCx = R.canvas.width / 2;
-      const handCy = R.canvas.height * 0.44;
-      drawHandSign(R.ctx, battleLetter, handCx, handCy, handSize);
+      // Draw real ASL reference image (public domain SVG from Wikimedia Commons)
+      const signImg = signImages[battleLetter];
+      if (signImg && signImg.complete) {
+        const imgSize = 180; // logical pixels
+        const px = R.scale;
+        const drawW = imgSize * px;
+        const drawH = imgSize * px;
+        const drawX = (R.canvas.width - drawW) / 2;
+        const drawY = R.px(36);
+        // White background behind the hand image for clarity
+        R.ctx.fillStyle = '#e0f8d0';
+        R.ctx.fillRect(drawX - 4, drawY - 4, drawW + 8, drawH + 8);
+        R.ctx.strokeStyle = '#346856';
+        R.ctx.lineWidth = 2;
+        R.ctx.strokeRect(drawX - 4, drawY - 4, drawW + 8, drawH + 8);
+        R.ctx.drawImage(signImg, drawX, drawY, drawW, drawH);
+      }
 
-      // Orientation label above hand
-      R.textColor(getHandSide(battleLetter), R.width / 2, 35, '#ebcb8b', 6, 'center');
-      R.textColor(getOrientation(battleLetter), R.width / 2, 43, '#ebcb8b', 5, 'center');
+      // Orientation labels below the image
+      R.textColor(getHandSide(battleLetter), R.width / 2, 100, '#ebcb8b', 5, 'center');
+      R.textColor(getOrientation(battleLetter), R.width / 2, 107, '#ebcb8b', 5, 'center');
 
       // Sign description with typewriter
       const desc = SIGN_DESCRIPTIONS[battleLetter] || 'Make the sign!';
@@ -763,14 +937,21 @@ function drawBattle() {
         R.text(`SIGN '${battleLetter}' NOW!`, R.width / 2, R.height - 40, 3, 8, 'center');
       }
 
-      // Ghost hand hint (high-fidelity, faint, pulsing)
-      const ghostAlpha = 0.2 + Math.sin(battleTimer / 400) * 0.08;
-      // Size the ghost hand to roughly match a real hand in the webcam
-      const ghostSize = 180;
-      drawGhostHand(R.ctx, battleLetter, R.canvas.width / 2, R.canvas.height * 0.38, ghostSize, ghostAlpha);
+      // Ghost hand hint — real SVG reference, semi-transparent and pulsing
+      const ghostImg = signImages[battleLetter];
+      if (ghostImg && ghostImg.complete) {
+        const ghostAlpha = 0.25 + Math.sin(battleTimer / 400) * 0.1;
+        const px = R.scale;
+        const gSize = 120 * px;
+        const gx = (R.canvas.width - gSize) / 2;
+        const gy = R.px(10);
+        R.ctx.globalAlpha = ghostAlpha;
+        R.ctx.drawImage(ghostImg, gx, gy, gSize, gSize);
+        R.ctx.globalAlpha = 1;
+      }
 
       // Orientation reminder
-      R.textColor(getOrientation(battleLetter), R.width / 2, 18, '#ebcb8b', 5, 'center');
+      R.textColor(getOrientation(battleLetter), R.width / 2, 4, '#ebcb8b', 5, 'center');
       break;
     }
 
@@ -799,6 +980,134 @@ function drawBattle() {
   }
 
   R.drawFlash();
+}
+
+// ─── Scene: Challenge Complete ─────────────────────────
+let ccTimer = 0;
+let ccLetter = '';
+let ccNpcIndex = -1;
+
+function initChallengeComplete() {
+  ccTimer = 0;
+  ccLetter = sceneData.letter || '?';
+  ccNpcIndex = sceneData.npcIndex ?? -1;
+  SFX.levelClear();
+}
+
+function updateChallengeComplete(dt) {
+  ccTimer += dt;
+
+  if (ccTimer > 1000) {
+    // Z = NEXT challenge (auto-navigate to next NPC)
+    if (isJustPressed('z') || isJustPressed('Enter')) {
+      SFX.select();
+      stopBGM();
+      switchScene('overworld', { autoAdvance: true });
+    }
+    // X = back to world MAP
+    if (isJustPressed('x')) {
+      SFX.select();
+      stopBGM();
+      switchScene('worldmap');
+    }
+  }
+}
+
+function drawChallengeComplete() {
+  R.clear(0);
+
+  // Border
+  R.rect(6, 6, R.width - 12, R.height - 12, 1);
+  R.rect(8, 8, R.width - 16, R.height - 16, 0);
+
+  const bounce = Math.sin(ccTimer / 180) * 3;
+
+  // Title
+  R.textColor('CHALLENGE', R.width / 2, 18 + bounce, '#88c070', 10, 'center');
+  R.textColor('COMPLETE!', R.width / 2, 34 + bounce, '#88c070', 10, 'center');
+
+  // Show the mastered letter big
+  R.rect(R.width / 2 - 16, 50, 32, 32, 1);
+  R.rect(R.width / 2 - 14, 52, 28, 28, 0);
+  R.textColor(ccLetter, R.width / 2, 56, '#ebcb8b', 20, 'center');
+
+  // Checkmark
+  R.textColor('MASTERED', R.width / 2, 88, '#88c070', 7, 'center');
+
+  // Navigation options
+  if (ccTimer > 1000) {
+    const pulse = Math.floor(ccTimer / 400) % 2;
+    // NEXT option (highlighted/pulsing)
+    if (pulse) {
+      R.textColor('Z: NEXT  \u2192', R.width / 2, 106, '#e0f8d0', 8, 'center');
+    } else {
+      R.text('Z: NEXT  \u2192', R.width / 2, 106, 3, 8, 'center');
+    }
+    R.text('X: MAP', R.width / 2, 120, 1, 7, 'center');
+  }
+}
+
+// ─── Scene: Zone Complete ──────────────────────────────
+let zcTimer = 0;
+let zcZone = null;
+
+function initZoneComplete() {
+  zcTimer = 0;
+  zcZone = sceneData.zone;
+  SFX.levelClear();
+}
+
+function updateZoneComplete(dt) {
+  zcTimer += dt;
+  // Auto-transition to world map after 5 seconds, or press Z
+  if (zcTimer > 2500 && (isJustPressed('z') || isJustPressed('Enter'))) {
+    switchScene('worldmap');
+  }
+  if (zcTimer > 6000) {
+    switchScene('worldmap');
+  }
+}
+
+function drawZoneComplete() {
+  R.clear(0);
+
+  // Double border for emphasis
+  R.rect(2, 2, R.width - 4, R.height - 4, 2);
+  R.rect(4, 4, R.width - 8, R.height - 8, 1);
+  R.rect(6, 6, R.width - 12, R.height - 12, 0);
+
+  const bounce = Math.sin(zcTimer / 200) * 4;
+  const flash = Math.floor(zcTimer / 300) % 2;
+
+  // Title with alternating colors
+  if (flash) {
+    R.textColor('ZONE', R.width / 2, 16, '#ebcb8b', 12, 'center');
+    R.textColor('COMPLETE!', R.width / 2, 32, '#ebcb8b', 12, 'center');
+  } else {
+    R.textColor('ZONE', R.width / 2, 16, '#e0f8d0', 12, 'center');
+    R.textColor('COMPLETE!', R.width / 2, 32, '#e0f8d0', 12, 'center');
+  }
+
+  if (zcZone) {
+    // Badge icon
+    R.sprite(BADGE_ICON, R.width / 2 - 7, 50 + bounce, 3);
+
+    // Badge name and zone name
+    R.textColor(zcZone.badge, R.width / 2, 78, zcZone.badgeColor, 8, 'center');
+    R.text(zcZone.name, R.width / 2, 92, 2, 7, 'center');
+
+    // Show all mastered letters
+    const letters = zcZone.letters;
+    const startX = R.width / 2 - (letters.length * 12) / 2;
+    letters.forEach((l, i) => {
+      R.textColor(l, startX + i * 12 + 4, 104, '#88c070', 8);
+    });
+    R.textColor('\u2713 \u2713 \u2713', R.width / 2, 114, '#88c070', 6, 'center');
+  }
+
+  if (zcTimer > 2500) {
+    R.text('A:CONTINUE', R.width / 2, 130, 2, 6, 'center');
+  }
 }
 
 // ─── Scene: Badge Earned ───────────────────────────────
@@ -925,6 +1234,8 @@ const sceneInits = {
   worldmap: initWorldMap,
   overworld: initOverworld,
   battle: initBattle,
+  challengecomplete: initChallengeComplete,
+  zonecomplete: initZoneComplete,
   badge: initBadge,
   profile: initProfile,
   gameover: initGameOver,
@@ -935,6 +1246,8 @@ const sceneUpdates = {
   worldmap: updateWorldMap,
   overworld: updateOverworld,
   battle: updateBattle,
+  challengecomplete: updateChallengeComplete,
+  zonecomplete: updateZoneComplete,
   badge: updateBadge,
   profile: updateProfile,
   gameover: updateGameOver,
@@ -945,6 +1258,8 @@ const sceneDraws = {
   worldmap: drawWorldMap,
   overworld: drawOverworld,
   battle: drawBattle,
+  challengecomplete: drawChallengeComplete,
+  zonecomplete: drawZoneComplete,
   badge: drawBadge,
   profile: drawProfile,
   gameover: drawGameOver,
@@ -1087,4 +1402,7 @@ function updateWebcamDisplay() {
 State.loadState();
 initTitle();
 initWebcam();
+initTouchControls();
+initResponsiveCanvas();
 requestAnimationFrame(gameLoop);
+

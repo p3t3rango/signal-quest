@@ -45,6 +45,23 @@
       <span>ASL Learning Game</span>
       <span id="fps-counter"></span>
     </div>
+
+    <!-- Touch Controls Overlay (visible on touch devices only) -->
+    <div id="touch-controls">
+      <div id="touch-dpad">
+        <button class="dpad-btn" id="dpad-up" aria-label="Up">&#9650;</button>
+        <div class="dpad-middle-row">
+          <button class="dpad-btn" id="dpad-left" aria-label="Left">&#9664;</button>
+          <div class="dpad-center"></div>
+          <button class="dpad-btn" id="dpad-right" aria-label="Right">&#9654;</button>
+        </div>
+        <button class="dpad-btn" id="dpad-down" aria-label="Down">&#9660;</button>
+      </div>
+      <div id="touch-buttons">
+        <button class="action-btn" id="btn-b" aria-label="B button">B</button>
+        <button class="action-btn" id="btn-a" aria-label="A button">A</button>
+      </div>
+    </div>
   </div>
 
   <video id="webcam-video" autoplay playsinline></video>
