@@ -1,1408 +1,859 @@
-// Signal Quest: Color Edition - Main Game Engine
+// Signal Quest: Color Edition — Mobile-first Duolingo-style ASL trainer
 import { Renderer } from './renderer.js';
 import { SFX, playBGM, stopBGM } from './audio.js';
-import { detectSign, SIGN_DESCRIPTIONS, ZONES, getDetectableLetters } from './signs.js';
-import * as State from './gamestate.js';
-import {
-  PLAYER_DOWN, PLAYER_UP, PLAYER_LEFT, PLAYER_RIGHT,
-  NPC_SENSEI, GATE_LOCKED, SIGN_POST, TREE, HOUSE, CHECKPOINT,
-  BADGE_ICON, TILES, TILE_COLORS
-} from './sprites.js';
+import { detectSign, SIGN_DESCRIPTIONS } from './signs.js';
 import { getOrientation, getHandSide } from './handdraw.js';
+import * as State from './gamestate.js';
 
 // ─── Setup ─────────────────────────────────────────────
 const canvas = document.getElementById('game-canvas');
 const R = new Renderer(canvas);
+const videoEl = document.getElementById('webcam-video');
+const processCanvas = document.getElementById('webcam-process');
 
-// ─── Preload ASL reference SVGs (public domain, Wikimedia Commons) ───
+// ─── Preload ASL reference SVGs ────────────────────────
 const signImages = {};
 const SIGN_LETTERS = ['A','B','C','D','F','I','K','L','O','R','U','V','W','Y'];
-let signImagesLoaded = 0;
 SIGN_LETTERS.forEach(letter => {
   const img = new Image();
-  img.onload = () => { signImagesLoaded++; };
   img.src = `/signs/${letter}.svg`;
   signImages[letter] = img;
 });
-const videoEl = document.getElementById('webcam-video');
-const processCanvas = document.getElementById('webcam-process');
-processCanvas.width = R.canvas.width;
-processCanvas.height = R.canvas.height;
 
-// Side panel webcam display
-const webcamDisplay = document.getElementById('webcam-display');
-const webcamDisplayCtx = webcamDisplay ? webcamDisplay.getContext('2d') : null;
-if (webcamDisplay) { webcamDisplay.width = 256; webcamDisplay.height = 192; }
-const camStatusEl = document.getElementById('cam-status');
-const handStatusEl = document.getElementById('hand-status');
+// ─── Input System ──────────────────────────────────────
+let tapX = -1, tapY = -1, tapped = false;
+let dragStartY = -1, dragDelta = 0, isDragging = false;
 
-// ─── Input ─────────────────────────────────────────────
-const keys = {};
-const justPressed = {};
-
-document.addEventListener('keydown', e => {
-  if (!keys[e.key]) justPressed[e.key] = true;
-  keys[e.key] = true;
+canvas.addEventListener('touchstart', e => {
   e.preventDefault();
+  const t = e.touches[0];
+  const p = R.screenToLogical(t.clientX, t.clientY);
+  tapX = p.x; tapY = p.y; tapped = true;
+  dragStartY = t.clientY; isDragging = false; dragDelta = 0;
+}, { passive: false });
+
+canvas.addEventListener('touchmove', e => {
+  e.preventDefault();
+  if (dragStartY >= 0) {
+    const dy = e.touches[0].clientY - dragStartY;
+    if (Math.abs(dy) > 8) { isDragging = true; dragDelta = dy; }
+  }
+}, { passive: false });
+
+canvas.addEventListener('touchend', e => {
+  e.preventDefault();
+  if (isDragging) { tapped = false; } // was a drag, not a tap
+  dragStartY = -1; isDragging = false;
+}, { passive: false });
+
+canvas.addEventListener('click', e => {
+  const p = R.screenToLogical(e.clientX, e.clientY);
+  tapX = p.x; tapY = p.y; tapped = true;
 });
+
+// Keyboard fallback (desktop)
+const keys = {};
+document.addEventListener('keydown', e => { keys[e.key] = true; e.preventDefault(); });
 document.addEventListener('keyup', e => { keys[e.key] = false; });
 
-function isJustPressed(key) {
-  return justPressed[key];
+function consumeTap() {
+  if (tapped) { tapped = false; return { x: tapX, y: tapY }; }
+  return null;
 }
 
-function clearJustPressed() {
-  for (const k in justPressed) justPressed[k] = false;
+// ─── Button System ─────────────────────────────────────
+let buttons = [];
+
+function btn(id, x, y, w, h, label, style = 'primary') {
+  buttons.push({ id, x, y, w, h, label, style });
 }
 
-// ─── Touch Controls ───────────────────────────────────
-function initTouchControls() {
-  const touchMap = {
-    'dpad-up':    'ArrowUp',
-    'dpad-down':  'ArrowDown',
-    'dpad-left':  'ArrowLeft',
-    'dpad-right': 'ArrowRight',
-    'btn-a':      'z',
-    'btn-b':      'x',
-  };
+function clearButtons() { buttons = []; }
 
-  // Also detect touch capability via JS and force-show the overlay
-  const hasTouchScreen = ('ontouchstart' in window) || (navigator.maxTouchPoints > 0);
-  if (hasTouchScreen) {
-    const overlay = document.getElementById('touch-controls');
-    if (overlay) overlay.style.display = 'flex';
-  }
-
-  Object.entries(touchMap).forEach(([btnId, keyName]) => {
-    const btn = document.getElementById(btnId);
-    if (!btn) return;
-
-    btn.addEventListener('touchstart', e => {
-      e.preventDefault();
-      if (!keys[keyName]) justPressed[keyName] = true;
-      keys[keyName] = true;
-    }, { passive: false });
-
-    btn.addEventListener('touchend', e => {
-      e.preventDefault();
-      keys[keyName] = false;
-    }, { passive: false });
-
-    btn.addEventListener('touchcancel', e => {
-      keys[keyName] = false;
-    });
-
-    // Prevent context menu on long press
-    btn.addEventListener('contextmenu', e => e.preventDefault());
-  });
-
-  // Prevent default touch behaviors on the game canvas (scrolling, zooming)
-  canvas.addEventListener('touchstart', e => e.preventDefault(), { passive: false });
-  canvas.addEventListener('touchmove', e => e.preventDefault(), { passive: false });
-}
-
-// ─── Responsive Canvas ────────────────────────────────
-function initResponsiveCanvas() {
-  function resizeCanvas() {
-    const frame = document.getElementById('canvas-frame');
-    if (!frame) return;
-    const frameW = frame.clientWidth;
-    const frameH = frame.clientHeight;
-    // Game aspect ratio is 160:144
-    const gameAspect = 160 / 144;
-    let displayW, displayH;
-    if (frameW / frameH > gameAspect) {
-      // Frame is wider than game — fit to height
-      displayH = frameH;
-      displayW = frameH * gameAspect;
-    } else {
-      // Frame is taller than game — fit to width
-      displayW = frameW;
-      displayH = frameW / gameAspect;
+function drawButtons() {
+  buttons.forEach(b => {
+    if (b.style === 'primary') {
+      R.rectColor(b.x, b.y, b.w, b.h, '#346856');
+      R.rectColor(b.x + 1, b.y + 1, b.w - 2, b.h - 2, '#1a3a2a');
+      R.textColor(b.label, b.x + b.w / 2, b.y + Math.floor((b.h - 8) / 2), '#e0f8d0', 8, 'center');
+    } else if (b.style === 'secondary') {
+      R.rectColor(b.x, b.y, b.w, b.h, '#222');
+      R.textColor(b.label, b.x + b.w / 2, b.y + Math.floor((b.h - 7) / 2), '#88c070', 7, 'center');
+    } else if (b.style === 'small') {
+      R.textColor(b.label, b.x + b.w / 2, b.y + 2, '#88c070', 6, 'center');
     }
-    canvas.style.width = Math.floor(displayW) + 'px';
-    canvas.style.height = Math.floor(displayH) + 'px';
-  }
-
-  window.addEventListener('resize', resizeCanvas);
-  // Also handle orientation change on mobile
-  window.addEventListener('orientationchange', () => {
-    setTimeout(resizeCanvas, 100);
   });
-  resizeCanvas();
 }
 
-// ─── Webcam ────────────────────────────────────────────
-let webcamReady = false;
-let handsInstance = null;
+function hitButton(tx, ty) {
+  return buttons.find(b => tx >= b.x && tx <= b.x + b.w && ty >= b.y && ty <= b.y + b.h);
+}
+
+// ─── Webcam / MediaPipe ────────────────────────────────
 let currentLandmarks = null;
 let handDetected = false;
+let webcamReady = false;
 
-async function initWebcam() {
-  try {
-    const stream = await navigator.mediaDevices.getUserMedia({
-      video: { width: 320, height: 240, facingMode: 'user' }
-    });
-    videoEl.srcObject = stream;
-    await videoEl.play();
-    webcamReady = true;
-    if (camStatusEl) { camStatusEl.textContent = 'CAM: ACTIVE'; camStatusEl.classList.add('active'); }
-    initMediaPipe();
-  } catch (err) {
-    console.warn('Webcam not available:', err);
-    if (camStatusEl) { camStatusEl.textContent = 'CAM: UNAVAILABLE'; }
-    if (handStatusEl) { handStatusEl.textContent = 'Camera not available — allow access in browser'; }
-  }
+function initWebcam() {
+  if (!navigator.mediaDevices?.getUserMedia) return;
+  navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user', width: 320, height: 240 } })
+    .then(stream => {
+      videoEl.srcObject = stream;
+      videoEl.play();
+      webcamReady = true;
+      initHands();
+    })
+    .catch(() => {});
 }
 
-function initMediaPipe() {
-  // Load MediaPipe Hands
-  const script1 = document.createElement('script');
-  script1.src = 'https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js';
-  script1.onload = () => {
-    const script2 = document.createElement('script');
-    script2.src = 'https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js';
-    script2.onload = () => {
-      setupHands();
-    };
-    document.head.appendChild(script2);
-  };
-  document.head.appendChild(script1);
-}
-
-function setupHands() {
-  if (typeof Hands === 'undefined') {
-    console.warn('MediaPipe Hands not loaded');
-    return;
-  }
-  handsInstance = new Hands({
-    locateFile: file => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
-  });
-  handsInstance.setOptions({
-    maxNumHands: 1,
-    modelComplexity: 1,
-    minDetectionConfidence: 0.6,
-    minTrackingConfidence: 0.5
-  });
-  handsInstance.onResults(results => {
-    if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+function initHands() {
+  if (typeof Hands === 'undefined') return;
+  const hands = new Hands({ locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/${f}` });
+  hands.setOptions({ maxNumHands: 1, modelComplexity: 1, minDetectionConfidence: 0.6, minTrackingConfidence: 0.5 });
+  hands.onResults(results => {
+    if (results.multiHandLandmarks?.length > 0) {
       currentLandmarks = results.multiHandLandmarks[0];
       handDetected = true;
-      if (handStatusEl) { handStatusEl.textContent = 'HAND DETECTED'; handStatusEl.className = 'detected'; }
     } else {
       currentLandmarks = null;
       handDetected = false;
-      if (handStatusEl) { handStatusEl.textContent = 'Show your hand to the camera'; handStatusEl.className = ''; }
     }
   });
-
-  // Start camera loop
   const cam = new Camera(videoEl, {
-    onFrame: async () => {
-      if (handsInstance) await handsInstance.send({ image: videoEl });
-    },
-    width: 320,
-    height: 240,
+    onFrame: async () => { await hands.send({ image: videoEl }); },
+    width: 320, height: 240,
   });
   cam.start();
 }
 
 // ─── Scene System ──────────────────────────────────────
-let currentScene = 'title';
-let sceneData = {};
+let scene = 'home';
+let sceneTimer = 0;
+let transitionPhase = 'none'; // 'none' | 'closing' | 'opening'
 let transitionTimer = 0;
 let transitionTarget = null;
-let transitionPhase = 'none'; // 'none' | 'closing' | 'black' | 'opening'
-const TRANSITION_DURATION = 400; // ms per phase
-const TRANSITION_PAUSE = 120;   // ms hold on black
+let transitionData = {};
+const TRANSITION_SPEED = 600; // ms for full close or open
 
-function switchScene(name, data = {}) {
-  if (transitionPhase !== 'none') return; // prevent double-trigger
+function goTo(name, data = {}) {
+  if (transitionPhase !== 'none') return;
   transitionTarget = name;
-  sceneData = data;
+  transitionData = data;
   transitionTimer = 0;
   transitionPhase = 'closing';
 }
 
 function finishTransition() {
-  currentScene = transitionTarget;
+  scene = transitionTarget;
+  sceneTimer = 0;
+  clearButtons();
   transitionTarget = null;
-  if (sceneInits[currentScene]) sceneInits[currentScene]();
+  const init = sceneInits[scene];
+  if (init) init(transitionData);
+  transitionPhase = 'opening';
+  transitionTimer = 0;
 }
 
-// ─── Scene: Title ──────────────────────────────────────
-let titleBlink = 0;
-let titleStarted = false;
-
-function initTitle() {
-  titleBlink = 0;
-  titleStarted = false;
+// ─── Scene: Home ───────────────────────────────────────
+function initHome() {
   playBGM('title');
 }
 
-function updateTitle(dt) {
-  titleBlink += dt;
-  if (isJustPressed('Enter') || isJustPressed('z') || isJustPressed(' ')) {
-    SFX.start();
-    stopBGM();
-    titleStarted = true;
-    State.loadState();
-    setTimeout(() => switchScene('worldmap'), 400);
+function updateHome(dt) {
+  sceneTimer += dt;
+  clearButtons();
+  const nextId = State.getNextLessonId();
+  if (nextId) {
+    btn('continue', 30, 170, 100, 22, 'CONTINUE', 'primary');
+  }
+  btn('lessons', 30, 200, 100, 18, 'LESSONS', 'secondary');
+  btn('profile', 30, 226, 100, 18, 'PROFILE', 'secondary');
+
+  const tap = consumeTap();
+  if (tap) {
+    const b = hitButton(tap.x, tap.y);
+    if (b?.id === 'continue' && nextId) { SFX.select(); stopBGM(); goTo('lesson', { lessonId: nextId }); }
+    else if (b?.id === 'lessons') { SFX.select(); stopBGM(); goTo('map'); }
+    else if (b?.id === 'profile') { SFX.select(); goTo('profile'); }
+  }
+  // Keyboard shortcuts
+  if (keys['Enter'] || keys['z']) { keys['Enter'] = false; keys['z'] = false;
+    const nextId2 = State.getNextLessonId();
+    if (nextId2) { SFX.select(); stopBGM(); goTo('lesson', { lessonId: nextId2 }); }
   }
 }
 
-function drawTitle() {
+function drawHome() {
   R.clear(0);
-  // Draw decorative border
-  R.rect(4, 4, R.width - 8, R.height - 8, 1);
-  R.rect(6, 6, R.width - 12, R.height - 12, 0);
 
   // Title
-  R.text('SIGNAL', R.width / 2, 24, 3, 16, 'center');
-  R.text('QUEST', R.width / 2, 44, 2, 16, 'center');
-  R.textColor('COLOR EDITION', R.width / 2, 66, '#e05050', 6, 'center');
+  const bounce = Math.sin(sceneTimer / 600) * 2;
+  R.textColor('SIGNAL', R.width / 2, 30 + bounce, '#88c070', 14, 'center');
+  R.textColor('QUEST', R.width / 2, 50 + bounce, '#e0f8d0', 14, 'center');
+  R.textColor('COLOR EDITION', R.width / 2, 72, '#e05050', 6, 'center');
 
-  // Decorative hand sprites
-  R.text('ASL', R.width / 2, 82, 2, 8, 'center');
+  // ASL hand icon
+  const img = signImages['A'];
+  if (img?.complete) R.drawImage(img, 60, 88, 40, 40);
 
-  // Draw a pixelated hand icon
-  const handY = 92;
-  R.rect(70, handY, 20, 20, 1);
-  R.rect(72, handY + 2, 16, 16, 2);
-  R.text('✌', 74, handY + 3, 3, 12);
+  // Streak
+  const st = State.getState();
+  R.textColor('\u{1F525}', 20, 140, '#e8c170', 10);
+  R.textColor(`${st.streak}`, 38, 141, '#e8c170', 10);
+  R.textColor('STREAK', 58, 143, '#88c070', 5);
 
-  // Blink prompt
-  if (Math.floor(titleBlink / 500) % 2 === 0) {
-    R.text('PRESS START', R.width / 2, 120, 3, 8, 'center');
-  }
+  // XP
+  R.textColor(`XP: ${st.xp}`, R.width - 10, 143, '#88c070', 6, 'right');
 
-  // Credits
-  R.text('v1.0', R.width / 2, 136, 1, 6, 'center');
+  // Buttons
+  drawButtons();
+
+  // Hearts at bottom
+  R.hearts(10, R.height - 20, st.hearts, st.maxHearts);
+
+  // Signs mastered count
+  R.textColor(`${State.getTotalSigns()}/14 SIGNS`, R.width / 2, R.height - 18, '#555', 5, 'center');
+
+  // Version
+  R.textColor('v2.0', R.width / 2, R.height - 8, '#222', 5, 'center');
 }
 
-// ─── Scene: World Map ──────────────────────────────────
-let mapCursor = 0;
-let mapBounce = 0;
-const MAP_NODE_POSITIONS = [
-  { x: 30, y: 100 },
-  { x: 60, y: 60 },
-  { x: 100, y: 80 },
-  { x: 140, y: 40 },
-];
+// ─── Scene: Map ────────────────────────────────────────
+let mapScroll = 0;
+const MAP_NODE_SPACING = 50;
 
-function initWorldMap() {
-  mapCursor = State.getState().currentZone;
-  mapBounce = 0;
-  playBGM('overworld');
+function initMap() {
+  // Scroll to show current lesson
+  const nextId = State.getNextLessonId();
+  const idx = nextId ? nextId - 1 : State.LESSONS.length - 1;
+  mapScroll = Math.max(0, idx * MAP_NODE_SPACING - R.height / 2);
 }
 
-function updateWorldMap(dt) {
-  mapBounce += dt;
+function updateMap(dt) {
+  sceneTimer += dt;
+  clearButtons();
+  btn('back', 4, 4, 40, 14, '< BACK', 'small');
 
-  if (isJustPressed('ArrowRight') || isJustPressed('ArrowDown')) {
-    const next = mapCursor + 1;
-    if (next < ZONES.length) {
-      mapCursor = next;
-      SFX.move();
-    }
+  // Scroll with drag
+  if (isDragging) {
+    mapScroll -= dragDelta * 0.3;
+    dragDelta = 0;
   }
-  if (isJustPressed('ArrowLeft') || isJustPressed('ArrowUp')) {
-    if (mapCursor > 0) {
-      mapCursor--;
-      SFX.move();
-    }
+  const maxScroll = Math.max(0, State.LESSONS.length * MAP_NODE_SPACING - R.height + 80);
+  mapScroll = Math.max(0, Math.min(maxScroll, mapScroll));
+
+  const tap = consumeTap();
+  if (tap) {
+    const b = hitButton(tap.x, tap.y);
+    if (b?.id === 'back') { SFX.select(); goTo('home'); return; }
+
+    // Check if tap hit a lesson node
+    State.LESSONS.forEach((lesson, i) => {
+      const ny = R.height - 60 - i * MAP_NODE_SPACING + mapScroll;
+      const nx = R.width / 2 + (i % 2 === 0 ? -20 : 20);
+      const dist = Math.hypot(tap.x - nx, tap.y - ny);
+      if (dist < 16 && State.isLessonUnlocked(lesson.id)) {
+        SFX.select();
+        goTo('lesson', { lessonId: lesson.id });
+      }
+    });
   }
-  if (isJustPressed('z') || isJustPressed('Enter')) {
-    if (State.isZoneUnlocked(mapCursor)) {
-      SFX.select();
-      State.setCurrentZone(mapCursor);
-      stopBGM();
-      switchScene('overworld');
-    } else {
-      SFX.blocked();
-      R.shake(2, 200);
-    }
-  }
-  // Profile screen
-  if (isJustPressed('x')) {
-    SFX.select();
-    switchScene('profile');
-  }
+
+  if (keys['x'] || keys['Escape']) { keys['x'] = false; keys['Escape'] = false; SFX.select(); goTo('home'); }
 }
 
-function drawWorldMap() {
+function drawMap() {
   R.clear(0);
+  R.rect(0, 0, R.width, 20, 1);
+  R.textColor('LESSONS', R.width / 2, 5, '#e0f8d0', 8, 'center');
+  drawButtons();
 
-  // Draw webcam bg
-  if (webcamReady) {
-    R.drawWebcamGBC(videoEl, processCanvas, 0.15);
-  }
+  // Draw path and nodes
+  const lessons = State.LESSONS;
+  for (let i = 0; i < lessons.length; i++) {
+    const lesson = lessons[i];
+    const ny = R.height - 60 - i * MAP_NODE_SPACING + mapScroll;
+    const nx = R.width / 2 + (i % 2 === 0 ? -20 : 20);
 
-  // Title bar
-  R.rect(0, 0, R.width, 14, 1);
-  R.text('WORLD MAP', R.width / 2, 3, 3, 8, 'center');
+    if (ny < 15 || ny > R.height + 10) continue; // off screen
 
-  // Draw paths between nodes
-  R.ctx.strokeStyle = R.palette[1];
-  R.ctx.lineWidth = 2;
-  R.ctx.setLineDash([3, 3]);
-  for (let i = 0; i < MAP_NODE_POSITIONS.length - 1; i++) {
-    const a = MAP_NODE_POSITIONS[i];
-    const b = MAP_NODE_POSITIONS[i + 1];
-    R.ctx.beginPath();
-    R.ctx.moveTo(a.x, a.y);
-    R.ctx.lineTo(b.x, b.y);
-    R.ctx.stroke();
-  }
-  R.ctx.setLineDash([]);
+    // Draw connecting line to next node
+    if (i < lessons.length - 1) {
+      const nextNy = R.height - 60 - (i + 1) * MAP_NODE_SPACING + mapScroll;
+      const nextNx = R.width / 2 + ((i + 1) % 2 === 0 ? -20 : 20);
+      R.ctx.strokeStyle = '#346856';
+      R.ctx.lineWidth = R.scale * 2;
+      R.ctx.setLineDash([R.scale * 3, R.scale * 3]);
+      R.ctx.beginPath();
+      R.ctx.moveTo(R.px(nx), R.px(ny));
+      R.ctx.lineTo(R.px(nextNx), R.px(nextNy));
+      R.ctx.stroke();
+      R.ctx.setLineDash([]);
+    }
 
-  // Draw nodes
-  ZONES.forEach((zone, i) => {
-    const pos = MAP_NODE_POSITIONS[i];
-    const unlocked = State.isZoneUnlocked(i);
-    const complete = State.isZoneComplete(zone.id);
-    const selected = i === mapCursor;
-    const bounce = selected ? Math.sin(mapBounce / 200) * 3 : 0;
+    const unlocked = State.isLessonUnlocked(lesson.id);
+    const complete = State.isLessonComplete(lesson.id);
+    const isCurrent = State.getNextLessonId() === lesson.id;
 
     // Node circle
-    const color = unlocked ? (complete ? 3 : 2) : 1;
-    R.rect(pos.x - 8, pos.y - 8 + bounce, 16, 16, color);
-    R.strokeRect(pos.x - 8, pos.y - 8 + bounce, 16, 16, selected ? 3 : 0);
-
-    // Zone number
-    R.text(`${i + 1}`, pos.x, pos.y - 3 + bounce, unlocked ? 0 : 1, 8, 'center');
-
-    // Lock icon for locked zones
-    if (!unlocked) {
-      R.text('X', pos.x, pos.y - 3 + bounce, 0, 8, 'center');
-    }
-
-    // Badge star for completed zones
     if (complete) {
-      R.textColor('★', pos.x - 2, pos.y - 14 + bounce, zone.badgeColor, 8);
-    }
-  });
-
-  // Info panel at bottom
-  const zone = ZONES[mapCursor];
-  R.rect(0, 108, R.width, 36, 1);
-  R.rect(2, 110, R.width - 4, 32, 0);
-  R.text(zone.name, 6, 113, 3, 7);
-  if (!State.isZoneUnlocked(mapCursor)) {
-    R.textColor('LOCKED', 6, 123, '#e05050', 6);
-  } else if (State.isZoneComplete(zone.id)) {
-    R.textColor('CLEAR!', 6, 123, '#88c070', 6);
-    R.text(zone.description, 6, 132, 2, 6);
-  } else {
-    R.text(zone.description, 6, 123, 2, 6);
-    R.text('A:ENTER', R.width - 6, 132, 2, 6, 'right');
-  }
-
-  // Controls hint
-  R.text('B:PROFILE', 6, 136, 1, 6);
-
-  R.drawFlash();
-}
-
-// ─── Scene: Overworld ──────────────────────────────────
-let playerX, playerY;
-let playerDir = 'down';
-let walkTimer = 0;
-let overworldNPCs = [];
-let overworldGates = [];
-let currentNPCIndex = -1;
-let overworldMessage = null;
-let messageTimer = 0;
-
-function initOverworld() {
-  const zone = State.getCurrentZone();
-  const zoneIdx = State.getState().currentZone;
-  playerX = 80;
-  playerY = 120;
-  playerDir = 'down';
-  walkTimer = 0;
-  currentNPCIndex = -1;
-  overworldMessage = null;
-
-  // Create NPCs and gates for current zone
-  overworldNPCs = [];
-  overworldGates = [];
-  const letters = zone.letters;
-  const challengeIdx = State.getState().currentChallenge;
-
-  letters.forEach((letter, i) => {
-    const completed = State.getState().completedSigns.includes(letter);
-    const x = 30 + i * 40;
-    const y = 50 + (i % 2) * 20;
-    overworldNPCs.push({
-      letter,
-      x, y,
-      completed,
-      active: i <= challengeIdx || completed,
-    });
-  });
-
-  // Gate at the end
-  overworldGates.push({
-    x: 140,
-    y: 16,
-    open: State.isZoneComplete(zone.id),
-  });
-
-  // If auto-advancing from challenge complete, position player near next uncompleted NPC
-  if (sceneData.autoAdvance) {
-    const nextNPC = overworldNPCs.find(npc => !npc.completed && npc.active);
-    if (nextNPC) {
-      playerX = nextNPC.x;
-      playerY = nextNPC.y + 20;
-      playerDir = 'up';
-    } else if (overworldGates[0] && overworldGates[0].open) {
-      // All NPCs done, position near gate
-      playerX = overworldGates[0].x;
-      playerY = overworldGates[0].y + 20;
-      playerDir = 'up';
-    }
-  }
-
-  playBGM('overworld');
-}
-
-function updateOverworld(dt) {
-  walkTimer += dt;
-
-  if (overworldMessage) {
-    messageTimer -= dt;
-    if (messageTimer <= 0 || isJustPressed('z') || isJustPressed('Enter')) {
-      overworldMessage = null;
-    }
-    return;
-  }
-
-  // Movement
-  const speed = 1.5;
-  let moving = false;
-  if (keys['ArrowLeft']) { playerX -= speed; playerDir = 'left'; moving = true; }
-  if (keys['ArrowRight']) { playerX += speed; playerDir = 'right'; moving = true; }
-  if (keys['ArrowUp']) { playerY -= speed; playerDir = 'up'; moving = true; }
-  if (keys['ArrowDown']) { playerY += speed; playerDir = 'down'; moving = true; }
-
-  // Clamp
-  playerX = Math.max(4, Math.min(R.width - 12, playerX));
-  playerY = Math.max(4, Math.min(R.height - 20, playerY));
-
-  // Check NPC proximity (center-to-center, generous radius)
-  const INTERACT_RADIUS = 28;
-  const HIGHLIGHT_RADIUS = 36;
-  currentNPCIndex = -1;
-  for (let i = 0; i < overworldNPCs.length; i++) {
-    const npc = overworldNPCs[i];
-    const dist = Math.hypot(playerX - npc.x, playerY - npc.y);
-    if (dist < HIGHLIGHT_RADIUS) {
-      currentNPCIndex = i; // track nearest NPC for visual prompt
-      break;
-    }
-  }
-
-  // Check NPC interaction
-  if (isJustPressed('z') || isJustPressed('Enter')) {
-    for (let i = 0; i < overworldNPCs.length; i++) {
-      const npc = overworldNPCs[i];
-      const dist = Math.hypot(playerX - npc.x, playerY - npc.y);
-      if (dist < INTERACT_RADIUS) {
-        if (npc.completed) {
-          overworldMessage = `You mastered '${npc.letter}'!`;
-          messageTimer = 2000;
-          SFX.select();
-        } else if (npc.active) {
-          SFX.select();
-          stopBGM();
-          switchScene('battle', { letter: npc.letter, npcIndex: i });
-        } else {
-          overworldMessage = 'Complete previous\nsigns first!';
-          messageTimer = 2000;
-          SFX.blocked();
-        }
-        break;
+      R.circleColor(nx, ny, 12, '#346856');
+      R.circleColor(nx, ny, 10, '#88c070');
+      R.textColor('\u2713', nx, ny - 5, '#081820', 8, 'center');
+      // Stars
+      const stars = State.getState().bestStars[lesson.id] || 0;
+      for (let s = 0; s < 3; s++) {
+        R.textColor(s < stars ? '\u2605' : '\u2606', nx - 10 + s * 10, ny + 10, s < stars ? '#ebcb8b' : '#444', 5, 'center');
       }
+    } else if (isCurrent) {
+      // Pulsing current node
+      const pulse = 1 + Math.sin(sceneTimer / 300) * 0.15;
+      const r = 12 * pulse;
+      R.circleColor(nx, ny, r + 2, '#ebcb8b');
+      R.circleColor(nx, ny, r, '#346856');
+      R.textColor(`${lesson.id}`, nx, ny - 5, '#e0f8d0', 8, 'center');
+    } else if (unlocked) {
+      R.circleColor(nx, ny, 12, '#222');
+      R.circleColor(nx, ny, 10, '#1a3a2a');
+      R.textColor(`${lesson.id}`, nx, ny - 5, '#88c070', 8, 'center');
+    } else {
+      R.circleColor(nx, ny, 12, '#1a1a1a');
+      R.circleColor(nx, ny, 10, '#111');
+      R.textColor('X', nx, ny - 5, '#333', 8, 'center');
     }
 
-    // Check gate
-    const gate = overworldGates[0];
-    if (gate) {
-      const dist = Math.hypot(playerX - gate.x, playerY - gate.y);
-      if (dist < 20) {
-        const zone = State.getCurrentZone();
-        const allDone = zone.letters.every(l => State.getState().completedSigns.includes(l));
-        if (allDone && !State.isZoneComplete(zone.id)) {
-          // Earn badge!
-          const badge = State.earnBadge(zone.id);
-          SFX.badge();
-          stopBGM();
-          switchScene('badge', { zone });
-        } else if (State.isZoneComplete(zone.id)) {
-          overworldMessage = 'Zone complete!\nReturn to map.';
-          messageTimer = 2000;
-        } else {
-          overworldMessage = 'Gate locked!\nComplete all signs.';
-          messageTimer = 2000;
-          SFX.blocked();
-          R.shake(2, 200);
-        }
-      }
-    }
-  }
-
-  // Return to map
-  if (isJustPressed('x')) {
-    SFX.select();
-    stopBGM();
-    switchScene('worldmap');
+    // Lesson name
+    R.textColor(lesson.name, nx + (i % 2 === 0 ? 18 : -18), ny - 8, unlocked ? '#e0f8d0' : '#333', 6, i % 2 === 0 ? 'left' : 'right');
+    R.textColor(lesson.subtitle, nx + (i % 2 === 0 ? 18 : -18), ny + 2, unlocked ? '#88c070' : '#222', 5, i % 2 === 0 ? 'left' : 'right');
   }
 }
 
-function drawOverworld() {
-  R.clear(1);
-
-  // Draw webcam background
-  if (webcamReady) {
-    R.drawWebcamGBC(videoEl, processCanvas, 0.2);
-  }
-
-  // Draw grass pattern
-  for (let y = 0; y < R.height; y += 16) {
-    for (let x = 0; x < R.width; x += 16) {
-      if ((x + y) % 32 === 0) {
-        R.rect(x + 2, y + 2, 2, 2, 2);
-      }
-    }
-  }
-
-  // Draw trees as decoration
-  const treePositions = [[4, 30], [4, 70], [150, 50], [150, 90], [8, 8], [140, 8]];
-  treePositions.forEach(([tx, ty]) => {
-    R.sprite(TREE, tx, ty, 1);
-  });
-
-  // Draw gate
-  overworldGates.forEach(gate => {
-    R.sprite(gate.open ? [] : GATE_LOCKED, gate.x - 4, gate.y, 2);
-    if (!gate.open) {
-      R.rect(gate.x - 12, gate.y, 24, 10, 0);
-      R.rect(gate.x - 12, gate.y + 1, 24, 8, 1);
-      R.textColor('▓▓▓', gate.x - 8, gate.y + 2, '#886622', 6);
-    } else {
-      R.textColor('EXIT', gate.x - 8, gate.y + 2, '#88c070', 6);
-    }
-  });
-
-  // Find the next target NPC (first uncompleted active NPC)
-  const nextTargetIdx = overworldNPCs.findIndex(npc => !npc.completed && npc.active);
-
-  // Draw NPCs
-  overworldNPCs.forEach((npc, i) => {
-    const bounce = Math.sin(walkTimer / 300 + i) * 2;
-    const isNear = (i === currentNPCIndex);
-    const isNextTarget = (i === nextTargetIdx);
-
-    // Pulsing beacon for next target NPC (visible from anywhere)
-    if (isNextTarget && !npc.completed) {
-      const pulseRadius = 14 + Math.sin(walkTimer / 150) * 4;
-      const pulseAlpha = 0.3 + Math.sin(walkTimer / 200) * 0.2;
-      // Outer glow ring
-      R.ctx.strokeStyle = '#ebcb8b';
-      R.ctx.lineWidth = R.scale * 2;
-      R.ctx.globalAlpha = pulseAlpha;
-      R.ctx.beginPath();
-      R.ctx.arc(R.px(npc.x), R.px(npc.y), R.px(pulseRadius), 0, Math.PI * 2);
-      R.ctx.stroke();
-      R.ctx.globalAlpha = 1;
-
-      // Small arrow indicator above the NPC
-      const arrowBob = Math.sin(walkTimer / 180) * 3;
-      R.textColor('\u25BC', npc.x - 2, npc.y - 20 + arrowBob, '#ebcb8b', 6);
-    }
-
-    // Highlight ring when player is nearby
-    if (isNear) {
-      const pulse = 0.5 + Math.sin(walkTimer / 200) * 0.3;
-      R.ctx.strokeStyle = npc.active ? '#e0f8d0' : '#666666';
-      R.ctx.lineWidth = R.scale;
-      R.ctx.globalAlpha = pulse;
-      R.ctx.beginPath();
-      R.ctx.arc(R.px(npc.x), R.px(npc.y), R.px(12), 0, Math.PI * 2);
-      R.ctx.stroke();
-      R.ctx.globalAlpha = 1;
-    }
-
-    // Flash effect for next target NPC sprite
-    if (isNextTarget && !npc.completed) {
-      const flashOn = Math.floor(walkTimer / 500) % 3 !== 0; // on 2/3 of the time
-      if (flashOn) {
-        R.sprite(NPC_SENSEI, npc.x - 4, npc.y - 4 + bounce, 1);
-      } else {
-        R.sprite(NPC_SENSEI, npc.x - 4, npc.y - 4 + bounce, 3); // brighter palette
-      }
-    } else {
-      R.sprite(NPC_SENSEI, npc.x - 4, npc.y - 4 + bounce, 1);
-    }
-
-    // Letter label above NPC
-    if (npc.completed) {
-      R.textColor('\u2713', npc.x - 1, npc.y - 12 + bounce, '#88c070', 8);
-    } else if (npc.active) {
-      R.textColor(npc.letter, npc.x - 2, npc.y - 12 + bounce, '#e0f8d0', 8);
-    } else {
-      R.textColor('?', npc.x - 1, npc.y - 12 + bounce, '#666666', 8);
-    }
-
-    // "Press A" prompt when close
-    if (isNear && !overworldMessage) {
-      const promptBounce = Math.sin(walkTimer / 250) * 2;
-      R.textColor('[Z] TALK', npc.x, npc.y + 12 + promptBounce, '#e0f8d0', 5, 'center');
-    }
-  });
-
-  // Draw player
-  const pSprite = playerDir === 'up' ? PLAYER_UP :
-                  playerDir === 'down' ? PLAYER_DOWN :
-                  playerDir === 'left' ? PLAYER_LEFT : PLAYER_RIGHT;
-  R.sprite(pSprite, playerX - 4, playerY - 5, 1);
-
-  // Zone title bar
-  const zone = State.getCurrentZone();
-  R.rect(0, 0, R.width, 12, 0);
-  R.text(zone.name.toUpperCase(), R.width / 2, 2, 3, 8, 'center');
-
-  // Hearts
-  R.hearts(4, R.height - 12, State.getState().hearts, State.getState().maxHearts);
-
-  // Dynamic hint bar at bottom
-  const allNPCsDone = overworldNPCs.every(npc => npc.completed);
-  const nextNPC = overworldNPCs.find(npc => !npc.completed && npc.active);
-  const hintPulse = Math.floor(walkTimer / 600) % 2;
-
-  R.rect(0, R.height - 20, R.width, 8, 0);
-  if (allNPCsDone && overworldGates[0]) {
-    // All signs done - direct to gate
-    if (hintPulse) {
-      R.textColor('ALL SIGNS DONE \u2192 GO TO GATE', R.width / 2, R.height - 19, '#ebcb8b', 6, 'center');
-    } else {
-      R.textColor('ALL SIGNS DONE \u2192 GO TO GATE', R.width / 2, R.height - 19, '#88c070', 6, 'center');
-    }
-  } else if (nextNPC) {
-    // Show which NPC to talk to
-    const hintColor = hintPulse ? '#ebcb8b' : '#e0f8d0';
-    R.textColor(`TALK TO '${nextNPC.letter}' \u2192 Z`, R.width / 2, R.height - 19, hintColor, 6, 'center');
-  }
-
-  // Controls hint
-  R.text('X:MAP', R.width - 4, R.height - 8, 1, 6, 'right');
-
-  // Message box
-  if (overworldMessage) {
-    R.rect(8, R.height - 48, R.width - 16, 32, 0);
-    R.rect(10, R.height - 46, R.width - 20, 28, 1);
-    R.text(overworldMessage, 16, R.height - 42, 3, 6);
-  }
-
-  R.drawFlash();
-}
-
-// ─── Scene: Battle (Sign Challenge) ───────────────────
-let battleLetter = '';
-let battlePhase = 'intro'; // intro, demo, attempt, success, fail
-let battleTimer = 0;
+// ─── Scene: Lesson ─────────────────────────────────────
+let lessonData = null;       // current lesson object
+let lessonSignIndex = 0;     // which sign in the lesson (0..N-1)
+let lessonPhase = 'intro';   // 'intro' | 'demo' | 'attempt' | 'correct' | 'wrong'
+let lessonTimer = 0;
 let holdTimer = 0;
-const HOLD_REQUIRED = 1500; // ms to hold sign
-let battleNpcIndex = -1;
-let attemptTimeout = 15000; // 15 seconds to attempt
-let demoTextIndex = 0;
-let demoTextTimer = 0;
+let heartsAtStart = 3;
+const HOLD_REQUIRED = 1500;  // ms to hold sign
+const ATTEMPT_TIMEOUT = 15000; // ms to complete sign
 
-function initBattle() {
-  battleLetter = sceneData.letter || 'L';
-  battleNpcIndex = sceneData.npcIndex ?? -1;
-  battlePhase = 'intro';
-  battleTimer = 0;
+function initLesson(data) {
+  lessonData = State.getLesson(data.lessonId);
+  lessonSignIndex = 0;
+  lessonPhase = 'intro';
+  lessonTimer = 0;
   holdTimer = 0;
-  demoTextIndex = 0;
-  demoTextTimer = 0;
-  playBGM('battle');
+  State.restoreHearts();
+  heartsAtStart = State.getState().hearts;
 }
 
-function updateBattle(dt) {
-  battleTimer += dt;
-
-  switch (battlePhase) {
-    case 'intro':
-      // Typewriter effect for intro text
-      demoTextTimer += dt;
-      if (demoTextTimer > 40) {
-        demoTextTimer = 0;
-        demoTextIndex++;
-        SFX.text();
-      }
-      if (isJustPressed('z') || isJustPressed('Enter') || battleTimer > 3000) {
-        battlePhase = 'demo';
-        battleTimer = 0;
-        demoTextIndex = 0;
-        demoTextTimer = 0;
-      }
-      break;
-
-    case 'demo':
-      // Show the sign demonstration
-      demoTextTimer += dt;
-      if (demoTextTimer > 50) {
-        demoTextTimer = 0;
-        demoTextIndex++;
-        SFX.text();
-      }
-      if ((isJustPressed('z') || isJustPressed('Enter')) && battleTimer > 1000) {
-        battlePhase = 'attempt';
-        battleTimer = 0;
-        holdTimer = 0;
-      }
-      break;
-
-    case 'attempt':
-      // Check for correct sign
-      if (handDetected && currentLandmarks) {
-        if (detectSign(currentLandmarks, battleLetter)) {
-          holdTimer += dt;
-          if (holdTimer % 200 < 20) SFX.tick();
-          if (holdTimer >= HOLD_REQUIRED) {
-            battlePhase = 'success';
-            battleTimer = 0;
-            SFX.success();
-            R.flash('#88c070', 300);
-            State.completeSign(battleLetter);
-            State.recordAttempt();
-            State.advanceChallenge();
-          }
-        } else {
-          holdTimer = Math.max(0, holdTimer - dt * 0.5); // decay slowly
-        }
-      } else {
-        holdTimer = Math.max(0, holdTimer - dt * 0.3);
-      }
-
-      // Timeout
-      if (battleTimer > attemptTimeout) {
-        battlePhase = 'fail';
-        battleTimer = 0;
-        State.recordAttempt();
-        const remaining = State.loseHeart();
-        SFX.heartLost();
-        R.shake(4, 400);
-        R.flash('#e05050', 200);
-        if (remaining <= 0) {
-          setTimeout(() => {
-            State.restoreHearts();
-            stopBGM();
-            switchScene('gameover');
-          }, 1500);
-        }
-      }
-      break;
-
-    case 'success':
-      if (battleTimer > 2500 || isJustPressed('z') || isJustPressed('Enter')) {
-        stopBGM();
-        // Check if all signs in zone are now complete
-        const zone = State.getCurrentZone();
-        const allDone = zone.letters.every(l => State.getState().completedSigns.includes(l));
-        if (allDone && !State.isZoneComplete(zone.id)) {
-          // Earn badge and go to zone complete screen
-          State.earnBadge(zone.id);
-          SFX.badge();
-          switchScene('zonecomplete', { zone });
-        } else {
-          switchScene('challengecomplete', { letter: battleLetter, npcIndex: battleNpcIndex });
-        }
-      }
-      break;
-
-    case 'fail':
-      if (battleTimer > 2000 || isJustPressed('z') || isJustPressed('Enter')) {
-        if (State.getState().hearts > 0) {
-          battlePhase = 'attempt';
-          battleTimer = 0;
-          holdTimer = 0;
-        }
-      }
-      break;
-  }
+function currentSign() {
+  return lessonData?.signs[lessonSignIndex];
 }
 
-function drawBattle() {
-  R.clear(0);
+function updateLesson(dt) {
+  sceneTimer += dt;
+  lessonTimer += dt;
+  clearButtons();
 
-  // Draw webcam feed during attempt
-  if (battlePhase === 'attempt' || battlePhase === 'success') {
-    if (webcamReady) {
-      R.drawWebcamGBC(videoEl, processCanvas, 0.4);
-    }
-    // Draw hand landmarks
-    if (currentLandmarks && handDetected) {
-      R.drawHandLandmarks(currentLandmarks, battlePhase === 'success' ? '#ffff00' : '#88c070');
-    }
-  }
-
-  // Battle frame
-  R.rect(0, 0, R.width, 16, 1);
-  R.text(`SIGN: '${battleLetter}'`, R.width / 2, 4, 3, 8, 'center');
-
-  // Hearts display
-  R.hearts(R.width - 34, 4, State.getState().hearts, State.getState().maxHearts);
-
-  switch (battlePhase) {
+  switch (lessonPhase) {
     case 'intro': {
-      // NPC appears
-      R.rect(20, 30, R.width - 40, 84, 1);
-      R.rect(22, 32, R.width - 44, 80, 0);
-
-      // NPC sprite
-      R.sprite(NPC_SENSEI, 30, 40, 2);
-
-      // Typewriter text
-      const fullText = `Sensei says:\nShow me the\nsign for '${battleLetter}'!`;
-      const visibleText = fullText.substring(0, demoTextIndex);
-      R.text(visibleText, 56, 42, 3, 6);
-
-      if (battleTimer > 1000) {
-        R.text('A:CONTINUE', R.width / 2, 104, 2, 6, 'center');
+      btn('begin', 40, 210, 80, 22, 'BEGIN', 'primary');
+      btn('back', 4, 4, 40, 14, '< BACK', 'small');
+      const tap = consumeTap();
+      if (tap) {
+        const b = hitButton(tap.x, tap.y);
+        if (b?.id === 'begin') { SFX.select(); lessonPhase = 'demo'; lessonTimer = 0; }
+        if (b?.id === 'back') { SFX.select(); goTo('home'); }
       }
+      if (keys['z'] || keys['Enter']) { keys['z'] = false; keys['Enter'] = false; SFX.select(); lessonPhase = 'demo'; lessonTimer = 0; }
+      if (keys['x']) { keys['x'] = false; SFX.select(); goTo('home'); }
       break;
     }
 
     case 'demo': {
-      // Show how to make the sign — full screen demo with high-fidelity hand art
-      R.rect(4, 18, R.width - 8, R.height - 22, 1);
-      R.rect(6, 20, R.width - 12, R.height - 26, 0);
-
-      R.text(`SIGN '${battleLetter}'`, R.width / 2, 24, 3, 8, 'center');
-
-      // Draw real ASL reference image (public domain SVG from Wikimedia Commons)
-      const signImg = signImages[battleLetter];
-      if (signImg && signImg.complete) {
-        const imgSize = 180; // logical pixels
-        const px = R.scale;
-        const drawW = imgSize * px;
-        const drawH = imgSize * px;
-        const drawX = (R.canvas.width - drawW) / 2;
-        const drawY = R.px(36);
-        // White background behind the hand image for clarity
-        R.ctx.fillStyle = '#e0f8d0';
-        R.ctx.fillRect(drawX - 4, drawY - 4, drawW + 8, drawH + 8);
-        R.ctx.strokeStyle = '#346856';
-        R.ctx.lineWidth = 2;
-        R.ctx.strokeRect(drawX - 4, drawY - 4, drawW + 8, drawH + 8);
-        R.ctx.drawImage(signImg, drawX, drawY, drawW, drawH);
+      if (lessonTimer > 1200) {
+        btn('ready', 40, 250, 80, 22, 'READY!', 'primary');
       }
-
-      // Orientation labels below the image
-      R.textColor(getHandSide(battleLetter), R.width / 2, 100, '#ebcb8b', 5, 'center');
-      R.textColor(getOrientation(battleLetter), R.width / 2, 107, '#ebcb8b', 5, 'center');
-
-      // Sign description with typewriter
-      const desc = SIGN_DESCRIPTIONS[battleLetter] || 'Make the sign!';
-      const visibleDesc = desc.substring(0, demoTextIndex);
-      R.text(visibleDesc, 12, 112, 2, 6);
-
-      if (battleTimer > 1500) {
-        R.text('A:GO!', R.width - 8, R.height - 10, 3, 6, 'right');
+      const tap = consumeTap();
+      if (tap && lessonTimer > 1200) {
+        const b = hitButton(tap.x, tap.y);
+        if (b?.id === 'ready') { SFX.select(); lessonPhase = 'attempt'; lessonTimer = 0; holdTimer = 0; }
+      }
+      if ((keys['z'] || keys['Enter']) && lessonTimer > 1200) {
+        keys['z'] = false; keys['Enter'] = false;
+        SFX.select(); lessonPhase = 'attempt'; lessonTimer = 0; holdTimer = 0;
       }
       break;
     }
 
     case 'attempt': {
-      // Progress bar for hold
-      const progress = holdTimer / HOLD_REQUIRED;
-      R.rect(10, R.height - 28, R.width - 20, 10, 0);
-      R.progressBar(11, R.height - 27, R.width - 22, 8, progress, 1, progress > 0.8 ? 3 : 2);
-
-      // Timer bar
-      const timeLeft = 1 - (battleTimer / attemptTimeout);
-      R.rect(10, R.height - 16, R.width - 20, 4, 0);
-      R.rect(11, R.height - 15, Math.floor((R.width - 22) * timeLeft), 2, timeLeft > 0.3 ? 2 : 3);
-
-      // Status text
-      R.rect(0, R.height - 42, R.width, 12, 0);
-      if (!handDetected) {
-        R.textColor('SHOW YOUR HAND!', R.width / 2, R.height - 40, '#e05050', 8, 'center');
-      } else if (holdTimer > 0) {
-        R.textColor('HOLD IT...', R.width / 2, R.height - 40, '#ebcb8b', 8, 'center');
+      // Detection
+      const letter = currentSign();
+      if (handDetected && currentLandmarks && detectSign(currentLandmarks, letter)) {
+        holdTimer += dt;
+        if (holdTimer % 200 < dt) SFX.tick();
+        if (holdTimer >= HOLD_REQUIRED) {
+          // Success!
+          SFX.success();
+          R.flash('#88c070', 200);
+          State.masterSign(letter);
+          lessonPhase = 'correct';
+          lessonTimer = 0;
+        }
       } else {
-        R.text(`SIGN '${battleLetter}' NOW!`, R.width / 2, R.height - 40, 3, 8, 'center');
+        holdTimer = Math.max(0, holdTimer - dt * 0.5); // decay
       }
 
-      // Ghost hand hint — real SVG reference, semi-transparent and pulsing
-      const ghostImg = signImages[battleLetter];
-      if (ghostImg && ghostImg.complete) {
-        const ghostAlpha = 0.25 + Math.sin(battleTimer / 400) * 0.1;
-        const px = R.scale;
-        const gSize = 120 * px;
-        const gx = (R.canvas.width - gSize) / 2;
-        const gy = R.px(10);
-        R.ctx.globalAlpha = ghostAlpha;
-        R.ctx.drawImage(ghostImg, gx, gy, gSize, gSize);
-        R.ctx.globalAlpha = 1;
+      // Timeout
+      if (lessonTimer > ATTEMPT_TIMEOUT) {
+        SFX.wrong();
+        R.shake(4, 300);
+        R.flash('#e05050', 150);
+        const remaining = State.loseHeart();
+        if (remaining <= 0) {
+          lessonPhase = 'wrong';
+          lessonTimer = 0;
+        } else {
+          lessonPhase = 'wrong';
+          lessonTimer = 0;
+        }
+      }
+      break;
+    }
+
+    case 'correct': {
+      if (lessonTimer > 2000) {
+        btn('next', 40, 200, 80, 22, 'NEXT \u2192', 'primary');
+      }
+      const tap = consumeTap();
+      if (tap && lessonTimer > 2000) {
+        const b = hitButton(tap.x, tap.y);
+        if (b?.id === 'next') advanceSign();
+      }
+      if ((keys['z'] || keys['Enter']) && lessonTimer > 2000) {
+        keys['z'] = false; keys['Enter'] = false;
+        advanceSign();
+      }
+      break;
+    }
+
+    case 'wrong': {
+      if (lessonTimer > 1500) {
+        if (!State.hasHearts()) {
+          btn('retry', 40, 210, 80, 22, 'RETRY', 'primary');
+          btn('quit', 40, 240, 80, 18, 'QUIT', 'secondary');
+        } else {
+          btn('tryagain', 40, 210, 80, 22, 'TRY AGAIN', 'primary');
+        }
+      }
+      const tap = consumeTap();
+      if (tap && lessonTimer > 1500) {
+        const b = hitButton(tap.x, tap.y);
+        if (b?.id === 'retry') { SFX.select(); initLesson({ lessonId: lessonData.id }); }
+        if (b?.id === 'quit') { SFX.select(); goTo('home'); }
+        if (b?.id === 'tryagain') { SFX.select(); lessonPhase = 'demo'; lessonTimer = 0; }
+      }
+      if (keys['z'] || keys['Enter']) { keys['z'] = false; keys['Enter'] = false;
+        if (!State.hasHearts()) { SFX.select(); initLesson({ lessonId: lessonData.id }); }
+        else { SFX.select(); lessonPhase = 'demo'; lessonTimer = 0; }
+      }
+      break;
+    }
+  }
+}
+
+function advanceSign() {
+  SFX.select();
+  lessonSignIndex++;
+  if (lessonSignIndex >= lessonData.signs.length) {
+    // Lesson complete!
+    const st = State.getState();
+    const stars = st.hearts >= 3 ? 3 : st.hearts >= 2 ? 2 : 1;
+    State.completeLesson(lessonData.id, stars);
+    State.addXP(lessonData.xp);
+    State.updateStreak();
+    goTo('complete', { lessonId: lessonData.id, stars, xp: lessonData.xp });
+  } else {
+    lessonPhase = 'demo';
+    lessonTimer = 0;
+    holdTimer = 0;
+  }
+}
+
+function drawLesson() {
+  R.clear(0);
+
+  // Top bar: progress dots + hearts
+  R.rect(0, 0, R.width, 18, 1);
+  const st = State.getState();
+  R.hearts(R.width - 42, 4, st.hearts, st.maxHearts);
+
+  // Progress dots
+  if (lessonData) {
+    const dotW = 6, gap = 3;
+    const totalW = lessonData.signs.length * (dotW + gap) - gap;
+    const startX = 8;
+    for (let i = 0; i < lessonData.signs.length; i++) {
+      const dx = startX + i * (dotW + gap);
+      if (i < lessonSignIndex) {
+        R.rectColor(dx, 7, dotW, 4, '#88c070'); // done
+      } else if (i === lessonSignIndex) {
+        R.rectColor(dx, 7, dotW, 4, '#ebcb8b'); // current
+      } else {
+        R.rectColor(dx, 7, dotW, 4, '#333'); // pending
+      }
+    }
+  }
+
+  switch (lessonPhase) {
+    case 'intro': {
+      drawButtons();
+      R.textColor(lessonData.name, R.width / 2, 40, '#e0f8d0', 10, 'center');
+      R.textColor(lessonData.subtitle, R.width / 2, 58, '#88c070', 6, 'center');
+
+      R.rect(20, 80, R.width - 40, 2, 1);
+
+      R.textColor('SIGNS TO LEARN:', R.width / 2, 92, '#88c070', 6, 'center');
+
+      // Show sign letters with small SVG previews
+      const signs = lessonData.signs;
+      const spacing = Math.min(40, (R.width - 40) / signs.length);
+      const startX = R.width / 2 - (signs.length * spacing) / 2;
+      signs.forEach((letter, i) => {
+        const lx = startX + i * spacing + spacing / 2;
+        R.rectColor(lx - 14, 110, 28, 34, '#1a3a2a');
+        const img = signImages[letter];
+        if (img?.complete) R.drawImage(img, lx - 12, 112, 24, 24);
+        R.textColor(letter, lx, 140, '#e0f8d0', 7, 'center');
+      });
+
+      R.textColor(`${signs.length} signs`, R.width / 2, 165, '#555', 6, 'center');
+      R.textColor(`+${lessonData.xp} XP`, R.width / 2, 180, '#ebcb8b', 6, 'center');
+      break;
+    }
+
+    case 'demo': {
+      const letter = currentSign();
+      R.textColor(`SIGN '${letter}'`, R.width / 2, 28, '#e0f8d0', 10, 'center');
+
+      // Large SVG reference image
+      const img = signImages[letter];
+      const imgSize = 100;
+      const imgX = (R.width - imgSize) / 2;
+      const imgY = 50;
+      R.rectColor(imgX - 3, imgY - 3, imgSize + 6, imgSize + 6, '#e0f8d0');
+      R.strokeRect(imgX - 3, imgY - 3, imgSize + 6, imgSize + 6, 1);
+      if (img?.complete) R.drawImage(img, imgX, imgY, imgSize, imgSize);
+
+      // Orientation
+      R.textColor(getHandSide(letter), R.width / 2, 158, '#ebcb8b', 5, 'center');
+      R.textColor(getOrientation(letter), R.width / 2, 168, '#ebcb8b', 5, 'center');
+
+      // Description (typewriter)
+      const desc = SIGN_DESCRIPTIONS[letter] || '';
+      const charCount = Math.min(desc.length, Math.floor(lessonTimer / 30));
+      R.textColor(desc.substring(0, charCount), 14, 185, '#88c070', 6);
+
+      drawButtons();
+      break;
+    }
+
+    case 'attempt': {
+      const letter = currentSign();
+
+      // Camera feed area
+      const camX = 10, camY = 24, camW = R.width - 20, camH = 130;
+      R.rectColor(camX, camY, camW, camH, '#111');
+      R.strokeRect(camX, camY, camW, camH, 2);
+
+      // Draw webcam feed
+      if (webcamReady && videoEl.readyState >= videoEl.HAVE_ENOUGH_DATA) {
+        R.ctx.drawImage(videoEl, R.px(camX), R.px(camY), R.px(camW), R.px(camH));
+        // Draw hand landmarks
+        if (currentLandmarks) {
+          R.drawHandLandmarks(currentLandmarks, camX, camY, camW, camH, '#88c070');
+        }
+      } else {
+        R.textColor('CAMERA', R.width / 2, camY + 50, '#333', 8, 'center');
+        R.textColor('LOADING...', R.width / 2, camY + 65, '#333', 6, 'center');
+      }
+
+      // Ghost hand SVG overlay
+      const ghostImg = signImages[letter];
+      if (ghostImg?.complete) {
+        const ghostAlpha = 0.2 + Math.sin(sceneTimer / 400) * 0.08;
+        R.drawImageAlpha(ghostImg, camX + camW / 2 - 35, camY + 10, 70, 70, ghostAlpha);
       }
 
       // Orientation reminder
-      R.textColor(getOrientation(battleLetter), R.width / 2, 4, '#ebcb8b', 5, 'center');
-      break;
-    }
+      R.textColor(getOrientation(letter), R.width / 2, 160, '#ebcb8b', 5, 'center');
 
-    case 'success': {
-      R.rect(20, 40, R.width - 40, 60, 1);
-      R.rect(22, 42, R.width - 44, 56, 0);
-
-      const bounce = Math.sin(battleTimer / 150) * 3;
-      R.textColor('CORRECT!', R.width / 2, 50 + bounce, '#88c070', 12, 'center');
-      R.text(`'${battleLetter}' MASTERED!`, R.width / 2, 72, 3, 8, 'center');
-
-      if (battleTimer > 1000) {
-        R.text('A:CONTINUE', R.width / 2, 88, 2, 6, 'center');
+      // Status text
+      R.rectColor(0, 170, R.width, 16, '#081820');
+      if (!handDetected) {
+        R.textColor('SHOW YOUR HAND!', R.width / 2, 172, '#e05050', 8, 'center');
+      } else if (holdTimer > 0) {
+        R.textColor('HOLD IT...', R.width / 2, 172, '#ebcb8b', 8, 'center');
+      } else {
+        R.textColor(`SIGN '${letter}' NOW!`, R.width / 2, 172, '#e0f8d0', 8, 'center');
       }
+
+      // Hold progress bar
+      const holdProg = holdTimer / HOLD_REQUIRED;
+      R.textColor('HOLD', 10, 194, '#555', 5);
+      R.progressBarColor(34, 194, R.width - 44, 8, holdProg, '#1a1a1a', holdProg > 0.8 ? '#88c070' : '#346856');
+
+      // Time remaining bar
+      const timeProg = 1 - lessonTimer / ATTEMPT_TIMEOUT;
+      R.textColor('TIME', 10, 208, '#555', 5);
+      R.progressBarColor(34, 208, R.width - 44, 8, timeProg, '#1a1a1a', timeProg > 0.3 ? '#346856' : '#e05050');
+
+      // Sign reference small image
+      const refImg = signImages[letter];
+      if (refImg?.complete) {
+        R.rectColor(R.width - 42, 224, 36, 36, '#1a3a2a');
+        R.drawImage(refImg, R.width - 40, 226, 32, 32);
+      }
+      R.textColor(`'${letter}'`, R.width - 24, 262, '#88c070', 6, 'center');
       break;
     }
 
-    case 'fail': {
-      R.rect(20, 40, R.width - 40, 60, 1);
-      R.rect(22, 42, R.width - 44, 56, 0);
-      R.textColor('TIME UP!', R.width / 2, 50, '#e05050', 12, 'center');
-      R.text('TRY AGAIN...', R.width / 2, 72, 2, 8, 'center');
-      R.hearts(R.width / 2 - 15, 84, State.getState().hearts, State.getState().maxHearts);
+    case 'correct': {
+      const letter = currentSign();
+      const bounce = Math.sin(lessonTimer / 150) * 3;
+      R.textColor('\u2713 CORRECT!', R.width / 2, 60 + bounce, '#88c070', 12, 'center');
+      R.textColor(`'${letter}' MASTERED`, R.width / 2, 90, '#e0f8d0', 8, 'center');
+
+      const img = signImages[letter];
+      if (img?.complete) R.drawImage(img, R.width / 2 - 30, 110, 60, 60);
+
+      R.textColor(`+${Math.floor(lessonData.xp / lessonData.signs.length)} XP`, R.width / 2, 180, '#ebcb8b', 8, 'center');
+
+      drawButtons();
+      break;
+    }
+
+    case 'wrong': {
+      const letter = currentSign();
+      R.textColor('WRONG', R.width / 2, 50, '#e05050', 12, 'center');
+      R.textColor(`THE SIGN FOR '${letter}':`, R.width / 2, 80, '#e0f8d0', 6, 'center');
+
+      const img = signImages[letter];
+      if (img?.complete) R.drawImage(img, R.width / 2 - 35, 95, 70, 70);
+
+      R.textColor(getOrientation(letter), R.width / 2, 172, '#ebcb8b', 5, 'center');
+
+      if (!State.hasHearts()) {
+        R.textColor('NO HEARTS LEFT!', R.width / 2, 190, '#e05050', 7, 'center');
+      }
+
+      drawButtons();
       break;
     }
   }
-
-  R.drawFlash();
 }
 
-// ─── Scene: Challenge Complete ─────────────────────────
-let ccTimer = 0;
-let ccLetter = '';
-let ccNpcIndex = -1;
+// ─── Scene: Complete ───────────────────────────────────
+let completeStars = 0;
+let completeXP = 0;
+let completeLessonId = 0;
 
-function initChallengeComplete() {
-  ccTimer = 0;
-  ccLetter = sceneData.letter || '?';
-  ccNpcIndex = sceneData.npcIndex ?? -1;
+function initComplete(data) {
+  completeStars = data.stars;
+  completeXP = data.xp;
+  completeLessonId = data.lessonId;
   SFX.levelClear();
 }
 
-function updateChallengeComplete(dt) {
-  ccTimer += dt;
+function updateComplete(dt) {
+  sceneTimer += dt;
+  clearButtons();
 
-  if (ccTimer > 1000) {
-    // Z = NEXT challenge (auto-navigate to next NPC)
-    if (isJustPressed('z') || isJustPressed('Enter')) {
-      SFX.select();
-      stopBGM();
-      switchScene('overworld', { autoAdvance: true });
-    }
-    // X = back to world MAP
-    if (isJustPressed('x')) {
-      SFX.select();
-      stopBGM();
-      switchScene('worldmap');
-    }
+  if (sceneTimer > 2500) {
+    btn('cont', 30, 240, 100, 22, 'CONTINUE', 'primary');
+  }
+
+  const tap = consumeTap();
+  if (tap && sceneTimer > 2500) {
+    const b = hitButton(tap.x, tap.y);
+    if (b?.id === 'cont') { SFX.select(); goTo('home'); }
+  }
+  if ((keys['z'] || keys['Enter']) && sceneTimer > 2500) {
+    keys['z'] = false; keys['Enter'] = false;
+    SFX.select(); goTo('home');
   }
 }
 
-function drawChallengeComplete() {
+function drawComplete() {
   R.clear(0);
 
-  // Border
-  R.rect(6, 6, R.width - 12, R.height - 12, 1);
-  R.rect(8, 8, R.width - 16, R.height - 16, 0);
+  R.textColor('LESSON', R.width / 2, 30, '#88c070', 10, 'center');
+  R.textColor('COMPLETE!', R.width / 2, 48, '#e0f8d0', 10, 'center');
 
-  const bounce = Math.sin(ccTimer / 180) * 3;
-
-  // Title
-  R.textColor('CHALLENGE', R.width / 2, 18 + bounce, '#88c070', 10, 'center');
-  R.textColor('COMPLETE!', R.width / 2, 34 + bounce, '#88c070', 10, 'center');
-
-  // Show the mastered letter big
-  R.rect(R.width / 2 - 16, 50, 32, 32, 1);
-  R.rect(R.width / 2 - 14, 52, 28, 28, 0);
-  R.textColor(ccLetter, R.width / 2, 56, '#ebcb8b', 20, 'center');
-
-  // Checkmark
-  R.textColor('MASTERED', R.width / 2, 88, '#88c070', 7, 'center');
-
-  // Navigation options
-  if (ccTimer > 1000) {
-    const pulse = Math.floor(ccTimer / 400) % 2;
-    // NEXT option (highlighted/pulsing)
-    if (pulse) {
-      R.textColor('Z: NEXT  \u2192', R.width / 2, 106, '#e0f8d0', 8, 'center');
-    } else {
-      R.text('Z: NEXT  \u2192', R.width / 2, 106, 3, 8, 'center');
+  // Stars animation
+  const starsY = 80;
+  for (let i = 0; i < 3; i++) {
+    const delay = i * 400;
+    if (sceneTimer > delay + 500) {
+      const filled = i < completeStars;
+      const bounce = sceneTimer - delay - 500 < 200 ? Math.sin((sceneTimer - delay - 500) / 100 * Math.PI) * 5 : 0;
+      R.textColor(filled ? '\u2605' : '\u2606', R.width / 2 - 25 + i * 25, starsY - bounce, filled ? '#ebcb8b' : '#444', 14, 'center');
     }
-    R.text('X: MAP', R.width / 2, 120, 1, 7, 'center');
-  }
-}
-
-// ─── Scene: Zone Complete ──────────────────────────────
-let zcTimer = 0;
-let zcZone = null;
-
-function initZoneComplete() {
-  zcTimer = 0;
-  zcZone = sceneData.zone;
-  SFX.levelClear();
-}
-
-function updateZoneComplete(dt) {
-  zcTimer += dt;
-  // Auto-transition to world map after 5 seconds, or press Z
-  if (zcTimer > 2500 && (isJustPressed('z') || isJustPressed('Enter'))) {
-    switchScene('worldmap');
-  }
-  if (zcTimer > 6000) {
-    switchScene('worldmap');
-  }
-}
-
-function drawZoneComplete() {
-  R.clear(0);
-
-  // Double border for emphasis
-  R.rect(2, 2, R.width - 4, R.height - 4, 2);
-  R.rect(4, 4, R.width - 8, R.height - 8, 1);
-  R.rect(6, 6, R.width - 12, R.height - 12, 0);
-
-  const bounce = Math.sin(zcTimer / 200) * 4;
-  const flash = Math.floor(zcTimer / 300) % 2;
-
-  // Title with alternating colors
-  if (flash) {
-    R.textColor('ZONE', R.width / 2, 16, '#ebcb8b', 12, 'center');
-    R.textColor('COMPLETE!', R.width / 2, 32, '#ebcb8b', 12, 'center');
-  } else {
-    R.textColor('ZONE', R.width / 2, 16, '#e0f8d0', 12, 'center');
-    R.textColor('COMPLETE!', R.width / 2, 32, '#e0f8d0', 12, 'center');
   }
 
-  if (zcZone) {
-    // Badge icon
-    R.sprite(BADGE_ICON, R.width / 2 - 7, 50 + bounce, 3);
-
-    // Badge name and zone name
-    R.textColor(zcZone.badge, R.width / 2, 78, zcZone.badgeColor, 8, 'center');
-    R.text(zcZone.name, R.width / 2, 92, 2, 7, 'center');
-
-    // Show all mastered letters
-    const letters = zcZone.letters;
-    const startX = R.width / 2 - (letters.length * 12) / 2;
-    letters.forEach((l, i) => {
-      R.textColor(l, startX + i * 12 + 4, 104, '#88c070', 8);
-    });
-    R.textColor('\u2713 \u2713 \u2713', R.width / 2, 114, '#88c070', 6, 'center');
+  // XP
+  if (sceneTimer > 1800) {
+    R.textColor(`+${completeXP} XP`, R.width / 2, 120, '#ebcb8b', 10, 'center');
   }
 
-  if (zcTimer > 2500) {
-    R.text('A:CONTINUE', R.width / 2, 130, 2, 6, 'center');
-  }
-}
-
-// ─── Scene: Badge Earned ───────────────────────────────
-let badgeTimer = 0;
-let badgeZone = null;
-
-function initBadge() {
-  badgeTimer = 0;
-  badgeZone = sceneData.zone;
-  SFX.levelClear();
-}
-
-function updateBadge(dt) {
-  badgeTimer += dt;
-  if (badgeTimer > 2000 && (isJustPressed('z') || isJustPressed('Enter'))) {
-    switchScene('worldmap');
-  }
-}
-
-function drawBadge() {
-  R.clear(0);
-  R.rect(10, 10, R.width - 20, R.height - 20, 1);
-  R.rect(12, 12, R.width - 24, R.height - 24, 0);
-
-  const bounce = Math.sin(badgeTimer / 200) * 4;
-
-  R.textColor('BADGE EARNED!', R.width / 2, 24, '#ebcb8b', 10, 'center');
-
-  if (badgeZone) {
-    // Draw badge icon big
-    R.sprite(BADGE_ICON, R.width / 2 - 7, 46 + bounce, 3);
-
-    R.textColor(badgeZone.badge, R.width / 2, 76, badgeZone.badgeColor, 8, 'center');
-    R.text(badgeZone.name, R.width / 2, 92, 2, 7, 'center');
-    R.text('COMPLETE!', R.width / 2, 104, 3, 8, 'center');
+  // Streak
+  if (sceneTimer > 2200) {
+    const st = State.getState();
+    R.textColor('\u{1F525}', R.width / 2 - 20, 150, '#e8c170', 10);
+    R.textColor(`${st.streak} day streak!`, R.width / 2, 154, '#e8c170', 6, 'center');
   }
 
-  if (badgeTimer > 2000) {
-    R.text('A:CONTINUE', R.width / 2, 124, 2, 6, 'center');
+  // Signs learned
+  if (sceneTimer > 1400) {
+    const lesson = State.getLesson(completeLessonId);
+    if (lesson) {
+      R.textColor('SIGNS LEARNED:', R.width / 2, 185, '#88c070', 6, 'center');
+      const signs = lesson.signs;
+      const spacing = 30;
+      const startX = R.width / 2 - (signs.length * spacing) / 2;
+      signs.forEach((letter, i) => {
+        R.textColor(letter, startX + i * spacing + spacing / 2, 200, '#e0f8d0', 10, 'center');
+      });
+    }
   }
+
+  drawButtons();
 }
 
 // ─── Scene: Profile ────────────────────────────────────
 function initProfile() {}
 
 function updateProfile(dt) {
-  if (isJustPressed('x') || isJustPressed('z') || isJustPressed('Enter') || isJustPressed('Escape')) {
-    SFX.select();
-    switchScene('worldmap');
+  sceneTimer += dt;
+  clearButtons();
+  btn('back', 4, 4, 40, 14, '< BACK', 'small');
+
+  const tap = consumeTap();
+  if (tap) {
+    const b = hitButton(tap.x, tap.y);
+    if (b?.id === 'back') { SFX.select(); goTo('home'); }
   }
+  if (keys['x'] || keys['Escape']) { keys['x'] = false; keys['Escape'] = false; SFX.select(); goTo('home'); }
 }
 
 function drawProfile() {
   R.clear(0);
-  R.rect(4, 4, R.width - 8, R.height - 8, 1);
-  R.rect(6, 6, R.width - 12, R.height - 12, 0);
+  R.rect(0, 0, R.width, 20, 1);
+  R.textColor('PROFILE', R.width / 2, 5, '#e0f8d0', 8, 'center');
+  drawButtons();
 
-  R.text('TRAINER CARD', R.width / 2, 10, 3, 8, 'center');
+  const st = State.getState();
 
-  // Player sprite
-  R.sprite(PLAYER_DOWN, 14, 26, 2);
+  // Stats
+  R.textColor('STATS', R.width / 2, 32, '#88c070', 7, 'center');
+  R.rect(10, 44, R.width - 20, 2, 1);
 
-  const s = State.getState();
-  R.text(s.playerName, 40, 28, 3, 8);
-  R.text(`Signs: ${s.completedSigns.length}/${getDetectableLetters().length}`, 40, 42, 2, 6);
-  R.text(`Accuracy: ${State.getAccuracy()}%`, 40, 52, 2, 6);
+  R.textColor(`XP: ${st.xp}`, 16, 55, '#ebcb8b', 7);
+  R.textColor(`STREAK: ${st.streak}`, 16, 70, '#e8c170', 7);
+  R.textColor(`LESSONS: ${st.completedLessons.length}/${State.getTotalLessons()}`, 16, 85, '#88c070', 7);
+  R.textColor(`SIGNS: ${st.masteredSigns.length}/14`, 16, 100, '#88c070', 7);
 
-  // Badges
-  R.text('BADGES:', 10, 68, 3, 7);
-  R.rect(8, 78, R.width - 16, 44, 1);
-  R.rect(10, 80, R.width - 20, 40, 0);
+  // Mastered signs grid
+  R.rect(10, 118, R.width - 20, 2, 1);
+  R.textColor('MASTERED SIGNS', R.width / 2, 128, '#88c070', 6, 'center');
 
-  ZONES.forEach((zone, i) => {
-    const earned = State.isZoneComplete(zone.id);
-    const x = 18 + i * 36;
-    const y = 86;
-    if (earned) {
-      R.sprite(BADGE_ICON, x, y, 2);
-      R.textColor(zone.badge.split(' ')[0].substring(0, 4), x - 2, y + 18, zone.badgeColor, 5);
-    } else {
-      R.rect(x, y, 14, 14, 1);
-      R.text('?', x + 3, y + 3, 1, 8);
+  SIGN_LETTERS.forEach((letter, i) => {
+    const col = i % 7;
+    const row = Math.floor(i / 7);
+    const x = 14 + col * 20;
+    const y = 146 + row * 28;
+    const mastered = st.masteredSigns.includes(letter);
+    R.rectColor(x, y, 16, 20, mastered ? '#1a3a2a' : '#111');
+    R.textColor(letter, x + 8, y + 2, mastered ? '#e0f8d0' : '#333', 7, 'center');
+    if (mastered) {
+      R.textColor('\u2713', x + 8, y + 13, '#88c070', 4, 'center');
     }
   });
 
-  R.text('B:BACK', R.width / 2, R.height - 16, 1, 6, 'center');
-}
+  // Lesson progress
+  R.rect(10, 210, R.width - 20, 2, 1);
+  R.textColor('LESSONS', R.width / 2, 220, '#88c070', 6, 'center');
 
-// ─── Scene: Game Over ──────────────────────────────────
-let gameOverTimer = 0;
-
-function initGameOver() {
-  gameOverTimer = 0;
-  SFX.gameOver();
-}
-
-function updateGameOver(dt) {
-  gameOverTimer += dt;
-  if (gameOverTimer > 2000 && (isJustPressed('z') || isJustPressed('Enter'))) {
-    State.restoreHearts();
-    switchScene('overworld');
-  }
-}
-
-function drawGameOver() {
-  R.clear(0);
-
-  const flicker = Math.floor(gameOverTimer / 300) % 2;
-  R.textColor('GAME OVER', R.width / 2, 40, flicker ? '#e05050' : '#880000', 14, 'center');
-
-  R.text('You ran out of\nhearts...', R.width / 2, 70, 2, 7, 'center');
-
-  // Show respawn at checkpoint
-  R.sprite(CHECKPOINT, R.width / 2 - 4, 92, 2);
-
-  if (gameOverTimer > 2000) {
-    R.text('A:TRY AGAIN', R.width / 2, 120, 3, 8, 'center');
-  }
+  State.LESSONS.forEach((lesson, i) => {
+    const y = 236 + i * 14;
+    const complete = State.isLessonComplete(lesson.id);
+    const stars = st.bestStars[lesson.id] || 0;
+    R.textColor(complete ? '\u2713' : '\u2022', 16, y, complete ? '#88c070' : '#333', 6);
+    R.textColor(lesson.name, 28, y, complete ? '#e0f8d0' : '#555', 6);
+    if (complete) {
+      for (let s = 0; s < 3; s++) {
+        R.textColor(s < stars ? '\u2605' : '\u2606', R.width - 36 + s * 10, y, s < stars ? '#ebcb8b' : '#444', 5);
+      }
+    }
+  });
 }
 
 // ─── Scene Registry ────────────────────────────────────
-const sceneInits = {
-  title: initTitle,
-  worldmap: initWorldMap,
-  overworld: initOverworld,
-  battle: initBattle,
-  challengecomplete: initChallengeComplete,
-  zonecomplete: initZoneComplete,
-  badge: initBadge,
-  profile: initProfile,
-  gameover: initGameOver,
-};
+const sceneInits = { home: initHome, map: initMap, lesson: initLesson, complete: initComplete, profile: initProfile };
+const sceneUpdates = { home: updateHome, map: updateMap, lesson: updateLesson, complete: updateComplete, profile: updateProfile };
+const sceneDraws = { home: drawHome, map: drawMap, lesson: drawLesson, complete: drawComplete, profile: drawProfile };
 
-const sceneUpdates = {
-  title: updateTitle,
-  worldmap: updateWorldMap,
-  overworld: updateOverworld,
-  battle: updateBattle,
-  challengecomplete: updateChallengeComplete,
-  zonecomplete: updateZoneComplete,
-  badge: updateBadge,
-  profile: updateProfile,
-  gameover: updateGameOver,
-};
-
-const sceneDraws = {
-  title: drawTitle,
-  worldmap: drawWorldMap,
-  overworld: drawOverworld,
-  battle: drawBattle,
-  challengecomplete: drawChallengeComplete,
-  zonecomplete: drawZoneComplete,
-  badge: drawBadge,
-  profile: drawProfile,
-  gameover: drawGameOver,
-};
-
-// ─── Main Loop ─────────────────────────────────────────
+// ─── Game Loop ─────────────────────────────────────────
 let lastTime = 0;
 
 function gameLoop(time) {
-  const dt = Math.min(time - lastTime, 50); // cap delta
+  const dt = lastTime ? Math.min(time - lastTime, 100) : 16;
   lastTime = time;
 
-  // Handle transitions (clean state machine)
-  if (transitionPhase !== 'none') {
+  // Update transition
+  if (transitionPhase === 'closing') {
     transitionTimer += dt;
-
-    if (transitionPhase === 'closing') {
-      // Iris closing over current scene
-      const p = Math.min(transitionTimer / TRANSITION_DURATION, 1);
-      if (sceneDraws[currentScene]) sceneDraws[currentScene]();
-      R.irisWipe(p, false);
-      if (p >= 1) {
-        transitionPhase = 'black';
-        transitionTimer = 0;
-        finishTransition();
-      }
-    } else if (transitionPhase === 'black') {
-      // Brief hold on black
-      R.clear(0);
-      if (transitionTimer >= TRANSITION_PAUSE) {
-        transitionPhase = 'opening';
-        transitionTimer = 0;
-      }
-    } else if (transitionPhase === 'opening') {
-      // Iris opening over new scene
-      const p = Math.min(transitionTimer / TRANSITION_DURATION, 1);
-      if (sceneDraws[currentScene]) sceneDraws[currentScene]();
-      R.irisWipe(1 - p, false);
-      if (p >= 1) {
-        transitionPhase = 'none';
-      }
+    if (transitionTimer >= TRANSITION_SPEED) {
+      finishTransition();
     }
-
-    clearJustPressed();
-    requestAnimationFrame(gameLoop);
-    return;
+  } else if (transitionPhase === 'opening') {
+    transitionTimer += dt;
+    if (transitionTimer >= TRANSITION_SPEED) {
+      transitionPhase = 'none';
+    }
   }
 
-  // Apply effects
+  // Update scene
+  if (transitionPhase === 'none' || transitionPhase === 'opening') {
+    const update = sceneUpdates[scene];
+    if (update) update(dt);
+  }
+
+  // Draw
   R.ctx.save();
   R.applyEffects(dt);
 
-  // Update and draw current scene
-  if (sceneUpdates[currentScene]) sceneUpdates[currentScene](dt);
-  if (sceneDraws[currentScene]) sceneDraws[currentScene]();
+  const draw = sceneDraws[scene];
+  if (draw) draw();
+
+  R.drawFlash();
+
+  // Transition overlay
+  if (transitionPhase === 'closing') {
+    R.irisWipe(transitionTimer / TRANSITION_SPEED);
+  } else if (transitionPhase === 'opening') {
+    R.irisWipe(1 - transitionTimer / TRANSITION_SPEED);
+  }
 
   R.ctx.restore();
 
-  // Draw webcam feed to side panel display
-  updateWebcamDisplay();
-
-  clearJustPressed();
   requestAnimationFrame(gameLoop);
-}
-
-function updateWebcamDisplay() {
-  if (!webcamDisplayCtx || !videoEl || videoEl.readyState < videoEl.HAVE_ENOUGH_DATA) return;
-  const w = webcamDisplay.width;
-  const h = webcamDisplay.height;
-
-  // Mirror the video horizontally so it feels natural
-  webcamDisplayCtx.save();
-  webcamDisplayCtx.translate(w, 0);
-  webcamDisplayCtx.scale(-1, 1);
-  webcamDisplayCtx.drawImage(videoEl, 0, 0, w, h);
-  webcamDisplayCtx.restore();
-
-  // Apply GBC palette effect
-  const imgData = webcamDisplayCtx.getImageData(0, 0, w, h);
-  const data = imgData.data;
-  const gbcColors = [
-    [8, 24, 32],     // darkest
-    [52, 104, 86],   // dark
-    [136, 192, 112], // light
-    [224, 248, 208], // lightest
-  ];
-  // Pixelate by sampling every 2 pixels
-  for (let py = 0; py < h; py += 2) {
-    for (let px = 0; px < w; px += 2) {
-      const i = (py * w + px) * 4;
-      const gray = data[i] * 0.299 + data[i+1] * 0.587 + data[i+2] * 0.114;
-      let ci;
-      if (gray > 190) ci = 3;
-      else if (gray > 120) ci = 2;
-      else if (gray > 60) ci = 1;
-      else ci = 0;
-      const c = gbcColors[ci];
-      // Fill 2x2 block
-      for (let dy = 0; dy < 2 && py+dy < h; dy++) {
-        for (let dx = 0; dx < 2 && px+dx < w; dx++) {
-          const j = ((py+dy) * w + (px+dx)) * 4;
-          data[j] = c[0]; data[j+1] = c[1]; data[j+2] = c[2];
-        }
-      }
-    }
-  }
-  webcamDisplayCtx.putImageData(imgData, 0, 0);
-
-  // Draw hand skeleton overlay if detected
-  if (handDetected && currentLandmarks) {
-    webcamDisplayCtx.save();
-    // Mirror landmarks too
-    const connections = [
-      [0,1],[1,2],[2,3],[3,4],
-      [0,5],[5,6],[6,7],[7,8],
-      [0,9],[9,10],[10,11],[11,12],
-      [0,13],[13,14],[14,15],[15,16],
-      [0,17],[17,18],[18,19],[19,20],
-      [5,9],[9,13],[13,17]
-    ];
-    webcamDisplayCtx.strokeStyle = '#88c070';
-    webcamDisplayCtx.lineWidth = 2;
-    connections.forEach(([a, b]) => {
-      const la = currentLandmarks[a];
-      const lb = currentLandmarks[b];
-      webcamDisplayCtx.beginPath();
-      webcamDisplayCtx.moveTo((1 - la.x) * w, la.y * h);
-      webcamDisplayCtx.lineTo((1 - lb.x) * w, lb.y * h);
-      webcamDisplayCtx.stroke();
-    });
-    webcamDisplayCtx.fillStyle = '#e0f8d0';
-    currentLandmarks.forEach(lm => {
-      webcamDisplayCtx.fillRect((1 - lm.x) * w - 2, lm.y * h - 2, 4, 4);
-    });
-    webcamDisplayCtx.restore();
-  }
 }
 
 // ─── Init ──────────────────────────────────────────────
 State.loadState();
-initTitle();
+initHome();
 initWebcam();
-initTouchControls();
-initResponsiveCanvas();
 requestAnimationFrame(gameLoop);
-
