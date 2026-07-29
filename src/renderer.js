@@ -126,6 +126,47 @@ export class Renderer {
     });
   }
 
+  // Width of a string in logical units — for laying out next to centered text
+  measureText(str, size = 8) {
+    this.ctx.font = `${size * this.scale}px "Press Start 2P", monospace`;
+    return this.ctx.measureText(str).width / this.scale;
+  }
+
+  // Pixel-art flame. Replaces the 🔥 emoji, which fell back to the system emoji
+  // font — different metrics and baseline from "Press Start 2P", so it never
+  // lined up with the text it sat beside.
+  // px must stay an integer: cells are floored onto the pixel grid, so a
+  // fractional size makes neighbouring cells overlap and the shape turns to mush.
+  flame(x, y, px = 1, flicker = 0) {
+    const FLAME = [
+      '...2...',
+      '..22...',
+      '..212..',
+      '.2212..',
+      '.21012.',
+      '2210122',
+      '2100012',
+      '2100012',
+      '.21012.',
+      '..222..',
+    ];
+    const COLORS = { '0': '#f8e070', '1': '#e8a020', '2': '#e05050' };
+    const s = Math.max(1, Math.round(px));
+    const ox = Math.round(x), oy = Math.round(y);
+    // Flicker nudges the top rows sideways so the tip dances a little
+    for (let row = 0; row < FLAME.length; row++) {
+      const wobble = row < 3 ? flicker : 0;
+      for (let col = 0; col < FLAME[row].length; col++) {
+        const c = FLAME[row][col];
+        if (c === '.') continue;
+        this.rectColor(ox + (col + wobble) * s, oy + row * s, s, s, COLORS[c]);
+      }
+    }
+  }
+
+  get flameWidth() { return 7; }
+  get flameHeight() { return 10; }
+
   // Draw an image in logical coords
   drawImage(img, x, y, w, h) {
     if (!img || !img.complete) return;
@@ -137,6 +178,35 @@ export class Renderer {
     this.ctx.globalAlpha = alpha;
     this.ctx.drawImage(img, this.px(x), this.px(y), this.px(w), this.px(h));
     this.ctx.globalAlpha = 1;
+  }
+
+  // Draw image flipped horizontally (mirror) — for matching selfie camera view
+  drawImageFlipped(img, x, y, w, h) {
+    if (!img || !img.complete) return;
+    this.ctx.save();
+    this.ctx.translate(this.px(x) + this.px(w), this.px(y));
+    this.ctx.scale(-1, 1);
+    this.ctx.drawImage(img, 0, 0, this.px(w), this.px(h));
+    this.ctx.restore();
+  }
+
+  drawImageFlippedAlpha(img, x, y, w, h, alpha) {
+    if (!img || !img.complete) return;
+    this.ctx.save();
+    this.ctx.globalAlpha = alpha;
+    this.ctx.translate(this.px(x) + this.px(w), this.px(y));
+    this.ctx.scale(-1, 1);
+    this.ctx.drawImage(img, 0, 0, this.px(w), this.px(h));
+    this.ctx.restore();
+  }
+
+  // Draw video/image mirrored within a specific region (for webcam selfie mode)
+  drawMirrored(img, x, y, w, h) {
+    this.ctx.save();
+    this.ctx.translate(this.px(x) + this.px(w), this.px(y));
+    this.ctx.scale(-1, 1);
+    this.ctx.drawImage(img, 0, 0, this.px(w), this.px(h));
+    this.ctx.restore();
   }
 
   progressBar(x, y, w, h, progress, bgColor = 0, fillColor = 2) {

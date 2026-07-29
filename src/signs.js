@@ -9,31 +9,27 @@
 // 13-16: ring (MCP, PIP, DIP, TIP)
 // 17-20: pinky (MCP, PIP, DIP, TIP)
 
+// ─── Finger state helpers ──────────────────────────────
+// These use relative comparisons scaled to hand size for robustness
+
+function handScale(landmarks) {
+  // Distance from wrist to middle MCP as a reference unit
+  const wrist = landmarks[0];
+  const midMCP = landmarks[9];
+  return Math.hypot(wrist.x - midMCP.x, wrist.y - midMCP.y) || 0.15;
+}
+
 function isFingerExtended(landmarks, finger) {
-  // finger: 'index' | 'middle' | 'ring' | 'pinky'
   const map = { index: [5,6,7,8], middle: [9,10,11,12], ring: [13,14,15,16], pinky: [17,18,19,20] };
   const ids = map[finger];
   if (!ids) return false;
   const tip = landmarks[ids[3]];
-  const dip = landmarks[ids[2]];
   const pip = landmarks[ids[1]];
-  // Tip is above (lower y) the PIP joint
-  return tip.y < pip.y - 0.02;
-}
-
-function isThumbExtended(landmarks) {
-  // Thumb tip is significantly to the side of the thumb IP
-  const tip = landmarks[4];
-  const ip = landmarks[3];
-  const mcp = landmarks[2];
-  // Check horizontal distance
-  return Math.abs(tip.x - mcp.x) > 0.06;
-}
-
-function isThumbUp(landmarks) {
-  const tip = landmarks[4];
-  const mcp = landmarks[2];
-  return tip.y < mcp.y - 0.05;
+  const mcp = landmarks[ids[0]];
+  // Tip is above PIP (lower y = higher on screen)
+  // Use a small tolerance relative to hand size
+  const hs = handScale(landmarks);
+  return tip.y < pip.y - hs * 0.05;
 }
 
 function isFingerCurled(landmarks, finger) {
@@ -41,7 +37,29 @@ function isFingerCurled(landmarks, finger) {
   const ids = map[finger];
   const tip = landmarks[ids[3]];
   const pip = landmarks[ids[1]];
-  return tip.y > pip.y;
+  const hs = handScale(landmarks);
+  // Tip is below or near PIP level — generous tolerance
+  return tip.y > pip.y - hs * 0.08;
+}
+
+function isThumbExtended(landmarks) {
+  const tip = landmarks[4];
+  const ip = landmarks[3];
+  const mcp = landmarks[2];
+  const hs = handScale(landmarks);
+  // Thumb tip is far from MCP horizontally OR vertically (supports different orientations)
+  const dx = Math.abs(tip.x - mcp.x);
+  const dy = Math.abs(tip.y - mcp.y);
+  return Math.max(dx, dy) > hs * 0.3;
+}
+
+function isThumbTucked(landmarks) {
+  const tip = landmarks[4];
+  const mcp = landmarks[2];
+  const hs = handScale(landmarks);
+  const dx = Math.abs(tip.x - mcp.x);
+  const dy = Math.abs(tip.y - mcp.y);
+  return Math.max(dx, dy) < hs * 0.4;
 }
 
 function allFingersCurled(landmarks) {
@@ -58,37 +76,59 @@ function allFingersExtended(landmarks) {
          isFingerExtended(landmarks, 'pinky');
 }
 
-// ASL letter detectors
+// Count how many of the 4 fingers are curled (0-4)
+function curledCount(landmarks) {
+  let n = 0;
+  for (const f of ['index', 'middle', 'ring', 'pinky']) {
+    if (isFingerCurled(landmarks, f)) n++;
+  }
+  return n;
+}
+
+// ─── Confidence-based detection ────────────────────────
+// Returns a confidence score 0-1 instead of boolean for better UX
+
+function fingerScore(landmarks, finger, wantExtended) {
+  const map = { index: [5,6,7,8], middle: [9,10,11,12], ring: [13,14,15,16], pinky: [17,18,19,20] };
+  const ids = map[finger];
+  const tip = landmarks[ids[3]];
+  const pip = landmarks[ids[1]];
+  const hs = handScale(landmarks);
+  const diff = (pip.y - tip.y) / hs; // positive = extended, negative = curled
+  if (wantExtended) return Math.min(1, Math.max(0, diff * 2));
+  return Math.min(1, Math.max(0, -diff * 2 + 0.5));
+}
+
+// ─── ASL letter detectors ──────────────────────────────
 const SIGN_DETECTORS = {
   A: (lm) => {
-    // Fist with thumb to the side
-    return allFingersCurled(lm) && isThumbExtended(lm);
+    // Fist with thumb to the side — all 4 fingers curled, thumb out
+    return curledCount(lm) >= 3 && isThumbExtended(lm);
   },
   B: (lm) => {
     // All fingers up, thumb tucked
-    return allFingersExtended(lm) && !isThumbExtended(lm);
+    return allFingersExtended(lm) && isThumbTucked(lm);
   },
   C: (lm) => {
-    // Curved hand - fingers together, slightly curved
+    // Curved hand — fingers together, slightly curved, thumb out
     const indexTip = lm[8];
     const pinkyTip = lm[20];
-    const thumbTip = lm[4];
-    // All fingers somewhat extended, thumb out, forming a C curve
     const spread = Math.abs(indexTip.x - pinkyTip.x);
+    const hs = handScale(lm);
     return isFingerExtended(lm, 'index') &&
            isFingerExtended(lm, 'middle') &&
-           spread < 0.12 &&
+           spread < hs * 0.6 &&
            isThumbExtended(lm);
   },
   D: (lm) => {
-    // Index up, other fingers curled touching thumb
+    // Index up, others curled
     return isFingerExtended(lm, 'index') &&
            isFingerCurled(lm, 'middle') &&
            isFingerCurled(lm, 'ring') &&
            isFingerCurled(lm, 'pinky');
   },
   F: (lm) => {
-    // Middle, ring, pinky up; index and thumb make circle
+    // Middle, ring, pinky up; index and thumb touch (circle)
     return !isFingerExtended(lm, 'index') &&
            isFingerExtended(lm, 'middle') &&
            isFingerExtended(lm, 'ring') &&
@@ -102,9 +142,7 @@ const SIGN_DETECTORS = {
            isFingerExtended(lm, 'pinky');
   },
   K: (lm) => {
-    // Index and middle up, spread apart
-    const indexTip = lm[8];
-    const middleTip = lm[12];
+    // Index and middle up, spread, thumb out
     return isFingerExtended(lm, 'index') &&
            isFingerExtended(lm, 'middle') &&
            isFingerCurled(lm, 'ring') &&
@@ -123,14 +161,16 @@ const SIGN_DETECTORS = {
     // All fingertips touch thumb tip forming O
     const thumbTip = lm[4];
     const indexTip = lm[8];
+    const hs = handScale(lm);
     const dist = Math.hypot(thumbTip.x - indexTip.x, thumbTip.y - indexTip.y);
-    return dist < 0.06 && !allFingersExtended(lm);
+    return dist < hs * 0.4 && !allFingersExtended(lm);
   },
   R: (lm) => {
     // Index and middle crossed/together and up
     const indexTip = lm[8];
     const middleTip = lm[12];
-    const close = Math.abs(indexTip.x - middleTip.x) < 0.03;
+    const hs = handScale(lm);
+    const close = Math.abs(indexTip.x - middleTip.x) < hs * 0.15;
     return isFingerExtended(lm, 'index') &&
            isFingerExtended(lm, 'middle') &&
            isFingerCurled(lm, 'ring') &&
@@ -138,27 +178,29 @@ const SIGN_DETECTORS = {
            close;
   },
   U: (lm) => {
-    // Index and middle up together
+    // Index and middle up together, thumb tucked
     const indexTip = lm[8];
     const middleTip = lm[12];
-    const close = Math.abs(indexTip.x - middleTip.x) < 0.06;
+    const hs = handScale(lm);
+    const close = Math.abs(indexTip.x - middleTip.x) < hs * 0.3;
     return isFingerExtended(lm, 'index') &&
            isFingerExtended(lm, 'middle') &&
            isFingerCurled(lm, 'ring') &&
            isFingerCurled(lm, 'pinky') &&
            close &&
-           !isThumbExtended(lm);
+           isThumbTucked(lm);
   },
   V: (lm) => {
     // Peace sign: index and middle up, spread
     const indexTip = lm[8];
     const middleTip = lm[12];
+    const hs = handScale(lm);
     const spread = Math.abs(indexTip.x - middleTip.x);
     return isFingerExtended(lm, 'index') &&
            isFingerExtended(lm, 'middle') &&
            isFingerCurled(lm, 'ring') &&
            isFingerCurled(lm, 'pinky') &&
-           spread > 0.04;
+           spread > hs * 0.15;
   },
   W: (lm) => {
     // Index, middle, ring up spread
@@ -187,7 +229,67 @@ export function getDetectableLetters() {
   return Object.keys(SIGN_DETECTORS);
 }
 
-// Pixel art representations of hand signs for the ghost hand guide
+// ─── Debug info for visual feedback ────────────────────
+// Returns a diagnostic object showing what the detector sees
+export function getHandDebugInfo(landmarks) {
+  if (!landmarks) return null;
+  const hs = handScale(landmarks);
+  return {
+    fingers: {
+      index: isFingerExtended(landmarks, 'index') ? 'UP' : 'DOWN',
+      middle: isFingerExtended(landmarks, 'middle') ? 'UP' : 'DOWN',
+      ring: isFingerExtended(landmarks, 'ring') ? 'UP' : 'DOWN',
+      pinky: isFingerExtended(landmarks, 'pinky') ? 'UP' : 'DOWN',
+    },
+    thumb: isThumbExtended(landmarks) ? 'OUT' : 'IN',
+    handScale: hs.toFixed(3),
+    // Which signs currently match
+    matches: Object.keys(SIGN_DETECTORS).filter(letter => SIGN_DETECTORS[letter](landmarks)),
+  };
+}
+
+// ─── Per-finger feedback for coaching ────────────────────
+// Returns array of hint objects telling user what to fix
+const SIGN_EXPECTATIONS = {
+  A: { index: 'curled', middle: 'curled', ring: 'curled', pinky: 'curled', thumb: 'extended' },
+  B: { index: 'extended', middle: 'extended', ring: 'extended', pinky: 'extended', thumb: 'tucked' },
+  C: { index: 'extended', middle: 'extended', ring: 'any', pinky: 'any', thumb: 'extended' },
+  D: { index: 'extended', middle: 'curled', ring: 'curled', pinky: 'curled', thumb: 'any' },
+  F: { index: 'curled', middle: 'extended', ring: 'extended', pinky: 'extended', thumb: 'any' },
+  I: { index: 'curled', middle: 'curled', ring: 'curled', pinky: 'extended', thumb: 'any' },
+  K: { index: 'extended', middle: 'extended', ring: 'curled', pinky: 'curled', thumb: 'extended' },
+  L: { index: 'extended', middle: 'curled', ring: 'curled', pinky: 'curled', thumb: 'extended' },
+  O: { index: 'any', middle: 'any', ring: 'any', pinky: 'any', thumb: 'any' },
+  R: { index: 'extended', middle: 'extended', ring: 'curled', pinky: 'curled', thumb: 'any' },
+  U: { index: 'extended', middle: 'extended', ring: 'curled', pinky: 'curled', thumb: 'tucked' },
+  V: { index: 'extended', middle: 'extended', ring: 'curled', pinky: 'curled', thumb: 'any' },
+  W: { index: 'extended', middle: 'extended', ring: 'extended', pinky: 'curled', thumb: 'any' },
+  Y: { index: 'curled', middle: 'curled', ring: 'curled', pinky: 'extended', thumb: 'extended' },
+};
+
+const FINGER_NAMES = { index: 'INDEX', middle: 'MIDDLE', ring: 'RING', pinky: 'PINKY' };
+
+export function getSignFeedback(landmarks, targetLetter) {
+  if (!landmarks) return [];
+  const expect = SIGN_EXPECTATIONS[targetLetter];
+  if (!expect) return [];
+
+  const hints = [];
+  for (const finger of ['index', 'middle', 'ring', 'pinky']) {
+    if (expect[finger] === 'extended' && !isFingerExtended(landmarks, finger)) {
+      hints.push(`RAISE ${FINGER_NAMES[finger]}`);
+    } else if (expect[finger] === 'curled' && !isFingerCurled(landmarks, finger)) {
+      hints.push(`CURL ${FINGER_NAMES[finger]}`);
+    }
+  }
+  if (expect.thumb === 'extended' && !isThumbExtended(landmarks)) {
+    hints.push('EXTEND THUMB');
+  } else if (expect.thumb === 'tucked' && !isThumbTucked(landmarks)) {
+    hints.push('TUCK THUMB IN');
+  }
+  return hints;
+}
+
 export const SIGN_DESCRIPTIONS = {
   A: "Make a fist with\nyour thumb on\nthe side",
   B: "All four fingers\nup straight,\nthumb tucked in",
@@ -205,42 +307,9 @@ export const SIGN_DESCRIPTIONS = {
   Y: "Thumb & pinky\nout, rest curled\n(hang loose!)",
 };
 
-// Curriculum zones
 export const ZONES = [
-  {
-    id: 'alpha_cliffs',
-    name: 'Alpha Cliffs',
-    description: 'Learn to fingerspell!',
-    badge: 'Quartz Digit',
-    badgeColor: '#88c0d0',
-    letters: ['A', 'B', 'L'],
-    unlocked: true,
-  },
-  {
-    id: 'signal_shores',
-    name: 'Signal Shores',
-    description: 'More letters await!',
-    badge: 'Coral Signal',
-    badgeColor: '#ebcb8b',
-    letters: ['D', 'I', 'V'],
-    unlocked: false,
-  },
-  {
-    id: 'gesture_grove',
-    name: 'Gesture Grove',
-    description: 'Complex hand shapes!',
-    badge: 'Emerald Palm',
-    badgeColor: '#a3be8c',
-    letters: ['W', 'Y', 'K'],
-    unlocked: false,
-  },
-  {
-    id: 'summit',
-    name: "Sentinel's Summit",
-    description: 'Master all signs!',
-    badge: 'Master Link',
-    badgeColor: '#b48ead',
-    letters: ['C', 'F', 'O', 'R', 'U'],
-    unlocked: false,
-  },
+  { id: 'alpha_cliffs', name: 'Alpha Cliffs', description: 'Learn to fingerspell!', badge: 'Quartz Digit', badgeColor: '#88c0d0', letters: ['A', 'B', 'L'], unlocked: true },
+  { id: 'signal_shores', name: 'Signal Shores', description: 'More letters await!', badge: 'Coral Signal', badgeColor: '#ebcb8b', letters: ['D', 'I', 'V'], unlocked: false },
+  { id: 'gesture_grove', name: 'Gesture Grove', description: 'Complex hand shapes!', badge: 'Emerald Palm', badgeColor: '#a3be8c', letters: ['W', 'Y', 'K'], unlocked: false },
+  { id: 'summit', name: "Sentinel's Summit", description: 'Master all signs!', badge: 'Master Link', badgeColor: '#b48ead', letters: ['C', 'F', 'O', 'R', 'U'], unlocked: false },
 ];

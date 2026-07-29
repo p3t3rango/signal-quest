@@ -4,7 +4,14 @@
 let audioCtx = null;
 
 function getCtx() {
-  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if (!audioCtx) {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    // Browsers create the context suspended until the page sees a user gesture.
+    // Without this the first track starts "playing" into silence.
+    const resume = () => { if (audioCtx.state === 'suspended') audioCtx.resume(); };
+    ['pointerdown', 'touchstart', 'keydown'].forEach(ev =>
+      window.addEventListener(ev, resume, { passive: true }));
+  }
   return audioCtx;
 }
 
@@ -102,76 +109,196 @@ export const SFX = {
   }
 };
 
-// Background music engine - simple looping chiptune
-let bgmInterval = null;
-let bgmPlaying = false;
+// ─── Background music engine ───────────────────────────
+// Lofi chiptune: chip waveforms (triangle/square) run through a lowpass and a
+// sample-accurate scheduler, so it keeps the 8-bit timbre but breathes.
+//
+// What makes it read as lofi rather than chiptune:
+//   - a shared lowpass rolls the highs off the whole mix
+//   - chords are 9ths/maj7ths rather than single melody notes
+//   - swing pushes off-beats late; per-note humanize keeps it off the grid
+//   - a quiet noise bed sits under everything like tape hiss
 
-const BGM_PATTERNS = {
-  overworld: {
-    melody: [
-      392, 440, 523, 440, 392, 330, 392, 440,
-      523, 587, 659, 587, 523, 440, 392, 330,
-      262, 330, 392, 440, 523, 440, 392, 330,
-      294, 349, 440, 523, 494, 440, 392, 349,
-    ],
-    bass: [
-      131, 131, 165, 165, 196, 196, 165, 165,
-      175, 175, 220, 220, 196, 196, 165, 165,
-      131, 131, 165, 165, 196, 196, 220, 220,
-      147, 147, 175, 175, 196, 196, 175, 175,
-    ],
-    tempo: 220
-  },
-  battle: {
-    melody: [
-      523, 0, 523, 659, 784, 0, 659, 523,
-      587, 0, 587, 698, 784, 0, 698, 587,
-      659, 0, 784, 880, 1047, 0, 880, 784,
-      523, 659, 784, 659, 523, 440, 392, 330,
-    ],
-    bass: [
-      131, 0, 131, 165, 196, 0, 165, 131,
-      147, 0, 147, 175, 196, 0, 175, 147,
-      165, 0, 196, 220, 262, 0, 220, 196,
-      131, 165, 196, 165, 131, 110, 98, 82,
-    ],
-    tempo: 160
-  },
-  title: {
-    melody: [
-      523, 0, 659, 0, 784, 0, 1047, 0,
-      880, 0, 784, 0, 659, 0, 523, 0,
-      440, 0, 523, 0, 659, 0, 784, 0,
-      659, 0, 523, 0, 440, 0, 392, 0,
-    ],
-    bass: [
-      131, 0, 165, 0, 196, 0, 262, 0,
-      220, 0, 196, 0, 165, 0, 131, 0,
-      110, 0, 131, 0, 165, 0, 196, 0,
-      165, 0, 131, 0, 110, 0, 98, 0,
-    ],
-    tempo: 280
-  }
+const N = {
+  A2: 110.00, B2: 123.47, C3: 130.81, D3: 146.83, E3: 164.81, F3: 174.61, G3: 196.00,
+  A3: 220.00, B3: 246.94, C4: 261.63, D4: 293.66, E4: 329.63, F4: 349.23, G4: 392.00,
+  A4: 440.00, B4: 493.88, C5: 523.25, D5: 587.33, E5: 659.25, F5: 698.46, G5: 783.99,
 };
 
-export function playBGM(pattern = 'overworld') {
+// Per-bar harmony. Steps are eighth notes, 8 per bar.
+const BGM_PATTERNS = {
+  lofi: {
+    stepMs: 400,        // eighths @ 75bpm
+    swing: 0.18,        // off-beats land this fraction of a step late
+    cutoff: 1250,
+    bars: [
+      { bass: 'A2', fifth: 'E3', chord: ['C4', 'E4', 'G4', 'B4'], mel: { 2: 'E5', 5: 'C5', 7: 'B4' } },
+      { bass: 'D3', fifth: 'A2', chord: ['D4', 'F4', 'A4', 'C5'], mel: { 1: 'D5', 4: 'A4', 6: 'F4' } },
+      { bass: 'F3', fifth: 'C3', chord: ['E4', 'F4', 'A4', 'C5'], mel: { 2: 'A4', 5: 'C5' } },
+      { bass: 'G3', fifth: 'D3', chord: ['D4', 'F4', 'G4', 'B4'], mel: { 0: 'B4', 3: 'D5', 6: 'G4' } },
+    ],
+    chordSteps: [0, 3, 6],
+    bassSteps: { 0: 'bass', 4: 'bass', 6: 'fifth' },
+  },
+  // Sparser and darker — for lesson screens, so it stays out of the way.
+  lofiFocus: {
+    stepMs: 460,
+    swing: 0.2,
+    cutoff: 900,
+    bars: [
+      { bass: 'D3', fifth: 'A2', chord: ['D4', 'F4', 'A4', 'C5'], mel: { 4: 'A4' } },
+      { bass: 'A2', fifth: 'E3', chord: ['C4', 'E4', 'G4', 'B4'], mel: { 6: 'E5' } },
+      { bass: 'F3', fifth: 'C3', chord: ['E4', 'F4', 'A4', 'C5'], mel: { 2: 'C5' } },
+      { bass: 'G3', fifth: 'D3', chord: ['D4', 'F4', 'G4', 'B4'], mel: {} },
+    ],
+    chordSteps: [0, 4],
+    bassSteps: { 0: 'bass', 4: 'fifth' },
+  },
+};
+
+let bgmChain = null;     // gain -> lowpass -> destination
+let bgmFilter = null;
+let hissSource = null;
+let hissGain = null;
+
+function getBgmChain() {
+  const ctx = getCtx();
+  if (!bgmChain) {
+    bgmFilter = ctx.createBiquadFilter();
+    bgmFilter.type = 'lowpass';
+    bgmFilter.frequency.value = 1250;
+    bgmFilter.Q.value = 0.6;
+    bgmChain = ctx.createGain();
+    bgmChain.gain.value = 1;
+    bgmChain.connect(bgmFilter);
+    bgmFilter.connect(ctx.destination);
+  }
+  return bgmChain;
+}
+
+// One scheduled note. Times are absolute AudioContext seconds, not setTimeout.
+function voice(freq, startAt, dur, opts = {}) {
+  const ctx = getCtx();
+  const { type = 'sine', volume = 0.05, detune = 0, attack = 0.012 } = opts;
+  const osc = ctx.createOscillator();
+  const gain = ctx.createGain();
+  osc.type = type;
+  osc.frequency.value = freq;
+  osc.detune.value = detune;
+  gain.gain.setValueAtTime(0.0001, startAt);
+  gain.gain.exponentialRampToValueAtTime(volume, startAt + attack);
+  gain.gain.exponentialRampToValueAtTime(0.0001, startAt + dur);
+  osc.connect(gain);
+  gain.connect(getBgmChain());
+  osc.start(startAt);
+  osc.stop(startAt + dur + 0.03);
+}
+
+// Tape hiss bed — looping white noise, very quiet.
+function startHiss() {
+  const ctx = getCtx();
+  if (hissSource) return;
+  const len = Math.floor(ctx.sampleRate * 2);
+  const buf = ctx.createBuffer(1, len, ctx.sampleRate);
+  const data = buf.getChannelData(0);
+  for (let i = 0; i < len; i++) data[i] = (Math.random() * 2 - 1) * 0.08;
+  hissSource = ctx.createBufferSource();
+  hissSource.buffer = buf;
+  hissSource.loop = true;
+  hissGain = ctx.createGain();
+  hissGain.gain.value = 0.012;
+  hissSource.connect(hissGain);
+  hissGain.connect(getBgmChain());
+  hissSource.start();
+}
+
+function stopHiss() {
+  if (hissSource) { try { hissSource.stop(); } catch (e) { /* already stopped */ } }
+  hissSource = null;
+  hissGain = null;
+}
+
+let bgmTimer = null;
+let bgmPlaying = false;
+let bgmPattern = null;
+let bgmStep = 0;
+let bgmNextTime = 0;
+
+const SCHEDULE_AHEAD = 0.25;  // seconds of notes queued in advance
+const TICK_MS = 25;
+
+function humanize(ms = 9) { return (Math.random() * 2 - 1) * (ms / 1000); }
+
+function scheduleStep(step, when) {
+  const p = bgmPattern;
+  const stepSec = p.stepMs / 1000;
+  const barIdx = Math.floor(step / 8) % p.bars.length;
+  const inBar = step % 8;
+  const bar = p.bars[barIdx];
+
+  // Swing: odd (off-beat) eighths land late. The grid itself stays uniform.
+  const swung = when + (inBar % 2 === 1 ? p.swing * stepSec : 0);
+
+  // Bass — triangle, the classic chip bass voice
+  const bassRole = p.bassSteps[inBar];
+  if (bassRole && bar[bassRole]) {
+    voice(N[bar[bassRole]], swung + humanize(6), stepSec * 1.7,
+      { type: 'triangle', volume: 0.11, attack: 0.02 });
+  }
+
+  // Chord pad — two detuned layers so it shimmers instead of sitting flat
+  if (p.chordSteps.includes(inBar)) {
+    bar.chord.forEach((name, i) => {
+      const t = swung + humanize(11) + i * 0.008;  // slight roll, like a strum
+      voice(N[name], t, stepSec * 2.4, { type: 'sine', volume: 0.038, attack: 0.05 });
+      voice(N[name], t, stepSec * 2.4, { type: 'triangle', volume: 0.022, detune: 7, attack: 0.06 });
+    });
+  }
+
+  // Melody — square keeps the 8-bit character; the lowpass tames the buzz
+  const mel = bar.mel[inBar];
+  if (mel) {
+    voice(N[mel], swung + humanize(12), stepSec * 1.3,
+      { type: 'square', volume: 0.045, attack: 0.015 });
+  }
+}
+
+function bgmTick() {
+  if (!bgmPlaying || !bgmPattern) return;
+  const ctx = getCtx();
+  const stepSec = bgmPattern.stepMs / 1000;
+  while (bgmNextTime < ctx.currentTime + SCHEDULE_AHEAD) {
+    scheduleStep(bgmStep, bgmNextTime);
+    bgmStep++;
+    bgmNextTime += stepSec;
+  }
+}
+
+export function playBGM(pattern = 'lofi') {
+  // Older scenes ask for chiptune names that no longer exist; fall back rather
+  // than silently playing nothing.
+  const p = BGM_PATTERNS[pattern] || BGM_PATTERNS.lofi;
+  // Bouncing home -> map -> home shouldn't restart the same track mid-phrase.
+  if (bgmPlaying && bgmPattern === p) return;
   stopBGM();
-  const p = BGM_PATTERNS[pattern];
-  if (!p) return;
-  let step = 0;
+  const ctx = getCtx();
+  if (ctx.state === 'suspended') ctx.resume();
+
+  bgmPattern = p;
   bgmPlaying = true;
-  bgmInterval = setInterval(() => {
-    if (!bgmPlaying) return;
-    const melodyNote = p.melody[step % p.melody.length];
-    const bassNote = p.bass[step % p.bass.length];
-    if (melodyNote > 0) playNote(melodyNote, p.tempo / 1000 * 0.8, 'square', 0.04);
-    if (bassNote > 0) playNote(bassNote, p.tempo / 1000 * 0.8, 'triangle', 0.03);
-    step++;
-  }, p.tempo);
+  bgmStep = 0;
+  bgmNextTime = ctx.currentTime + 0.1;
+  getBgmChain();
+  bgmFilter.frequency.setTargetAtTime(p.cutoff, ctx.currentTime, 0.3);
+  startHiss();
+  bgmTick();
+  bgmTimer = setInterval(bgmTick, TICK_MS);
 }
 
 export function stopBGM() {
   bgmPlaying = false;
-  if (bgmInterval) clearInterval(bgmInterval);
-  bgmInterval = null;
+  if (bgmTimer) clearInterval(bgmTimer);
+  bgmTimer = null;
+  bgmPattern = null;
+  stopHiss();
 }

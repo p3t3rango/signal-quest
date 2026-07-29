@@ -1,7 +1,7 @@
 // Signal Quest: Color Edition — Mobile-first Duolingo-style ASL trainer
 import { Renderer } from './renderer.js';
-import { SFX, playBGM, stopBGM } from './audio.js';
-import { detectSign, SIGN_DESCRIPTIONS } from './signs.js';
+import { SFX, playBGM } from './audio.js';
+import { detectSign, SIGN_DESCRIPTIONS, getHandDebugInfo, getSignFeedback } from './signs.js';
 import { getOrientation, getHandSide } from './handdraw.js';
 import * as State from './gamestate.js';
 
@@ -95,19 +95,18 @@ let handDetected = false;
 let webcamReady = false;
 
 function initWebcam() {
-  if (!navigator.mediaDevices?.getUserMedia) return;
-  navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user', width: 320, height: 240 } })
-    .then(stream => {
-      videoEl.srcObject = stream;
-      videoEl.play();
-      webcamReady = true;
-      initHands();
-    })
-    .catch(() => {});
+  if (!navigator.mediaDevices?.getUserMedia) {
+    console.warn('[SignalQuest] getUserMedia unavailable — camera features disabled');
+    return;
+  }
+  if (typeof Hands === 'undefined' || typeof Camera === 'undefined') {
+    console.warn('[SignalQuest] MediaPipe scripts did not load — hand detection disabled');
+    return;
+  }
+  initHands();
 }
 
 function initHands() {
-  if (typeof Hands === 'undefined') return;
   const hands = new Hands({ locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/${f}` });
   hands.setOptions({ maxNumHands: 1, modelComplexity: 1, minDetectionConfidence: 0.6, minTrackingConfidence: 0.5 });
   hands.onResults(results => {
@@ -119,11 +118,16 @@ function initHands() {
       handDetected = false;
     }
   });
+  // camera_utils' Camera acquires the webcam itself and drives onFrame from
+  // requestAnimationFrame. Don't call getUserMedia separately — a second
+  // acquisition leaks the first stream and keeps the device held open.
   const cam = new Camera(videoEl, {
     onFrame: async () => { await hands.send({ image: videoEl }); },
     width: 320, height: 240,
   });
-  cam.start();
+  Promise.resolve(cam.start())
+    .then(() => { webcamReady = true; })
+    .catch(e => console.error('[SignalQuest] camera start failed', e));
 }
 
 // ─── Scene System ──────────────────────────────────────
@@ -156,7 +160,7 @@ function finishTransition() {
 
 // ─── Scene: Home ───────────────────────────────────────
 function initHome() {
-  playBGM('title');
+  playBGM('lofi');
 }
 
 function updateHome(dt) {
@@ -172,14 +176,14 @@ function updateHome(dt) {
   const tap = consumeTap();
   if (tap) {
     const b = hitButton(tap.x, tap.y);
-    if (b?.id === 'continue' && nextId) { SFX.select(); stopBGM(); goTo('lesson', { lessonId: nextId }); }
-    else if (b?.id === 'lessons') { SFX.select(); stopBGM(); goTo('map'); }
+    if (b?.id === 'continue' && nextId) { SFX.select(); goTo('lesson', { lessonId: nextId }); }
+    else if (b?.id === 'lessons') { SFX.select(); goTo('map'); }
     else if (b?.id === 'profile') { SFX.select(); goTo('profile'); }
   }
   // Keyboard shortcuts
   if (keys['Enter'] || keys['z']) { keys['Enter'] = false; keys['z'] = false;
     const nextId2 = State.getNextLessonId();
-    if (nextId2) { SFX.select(); stopBGM(); goTo('lesson', { lessonId: nextId2 }); }
+    if (nextId2) { SFX.select(); goTo('lesson', { lessonId: nextId2 }); }
   }
 }
 
@@ -198,7 +202,7 @@ function drawHome() {
 
   // Streak
   const st = State.getState();
-  R.textColor('\u{1F525}', 20, 140, '#e8c170', 10);
+  R.flame(20, 139, 1, Math.sin(sceneTimer / 120) > 0 ? 0 : 1);
   R.textColor(`${st.streak}`, 38, 141, '#e8c170', 10);
   R.textColor('STREAK', 58, 143, '#88c070', 5);
 
@@ -223,6 +227,7 @@ let mapScroll = 0;
 const MAP_NODE_SPACING = 50;
 
 function initMap() {
+  playBGM('lofi');
   // Scroll to show current lesson
   const nextId = State.getNextLessonId();
   const idx = nextId ? nextId - 1 : State.LESSONS.length - 1;
@@ -335,10 +340,14 @@ let lessonPhase = 'intro';   // 'intro' | 'demo' | 'attempt' | 'correct' | 'wron
 let lessonTimer = 0;
 let holdTimer = 0;
 let heartsAtStart = 3;
-const HOLD_REQUIRED = 1500;  // ms to hold sign
-const ATTEMPT_TIMEOUT = 15000; // ms to complete sign
+const HOLD_REQUIRED = 1200;  // ms to hold sign (reduced for better feel)
+const ATTEMPT_TIMEOUT = 20000; // ms to complete sign (more time to learn)
+let detectionBuffer = [];
+const SMOOTH_FRAMES = 5;
 
 function initLesson(data) {
+  // Sparser, darker track — practice needs the attention, not the music
+  playBGM('lofiFocus');
   lessonData = State.getLesson(data.lessonId);
   lessonSignIndex = 0;
   lessonPhase = 'intro';
@@ -379,19 +388,24 @@ function updateLesson(dt) {
       const tap = consumeTap();
       if (tap && lessonTimer > 1200) {
         const b = hitButton(tap.x, tap.y);
-        if (b?.id === 'ready') { SFX.select(); lessonPhase = 'attempt'; lessonTimer = 0; holdTimer = 0; }
+        if (b?.id === 'ready') { SFX.select(); lessonPhase = 'attempt'; lessonTimer = 0; holdTimer = 0; detectionBuffer = []; }
       }
       if ((keys['z'] || keys['Enter']) && lessonTimer > 1200) {
         keys['z'] = false; keys['Enter'] = false;
-        SFX.select(); lessonPhase = 'attempt'; lessonTimer = 0; holdTimer = 0;
+        SFX.select(); lessonPhase = 'attempt'; lessonTimer = 0; holdTimer = 0; detectionBuffer = [];
       }
       break;
     }
 
     case 'attempt': {
-      // Detection
+      // Detection with frame smoothing
       const letter = currentSign();
-      if (handDetected && currentLandmarks && detectSign(currentLandmarks, letter)) {
+      const rawDetected = handDetected && currentLandmarks && detectSign(currentLandmarks, letter);
+      detectionBuffer.push(rawDetected);
+      if (detectionBuffer.length > SMOOTH_FRAMES) detectionBuffer.shift();
+      const smoothDetected = detectionBuffer.filter(Boolean).length >= 3; // 3 of 5 frames
+
+      if (smoothDetected) {
         holdTimer += dt;
         if (holdTimer % 200 < dt) SFX.tick();
         if (holdTimer >= HOLD_REQUIRED) {
@@ -403,7 +417,7 @@ function updateLesson(dt) {
           lessonTimer = 0;
         }
       } else {
-        holdTimer = Math.max(0, holdTimer - dt * 0.5); // decay
+        holdTimer = Math.max(0, holdTimer - dt * 0.3); // slower decay
       }
 
       // Timeout
@@ -525,7 +539,7 @@ function drawLesson() {
         const lx = startX + i * spacing + spacing / 2;
         R.rectColor(lx - 14, 110, 28, 34, '#1a3a2a');
         const img = signImages[letter];
-        if (img?.complete) R.drawImage(img, lx - 12, 112, 24, 24);
+        if (img?.complete) R.drawImageFlipped(img, lx - 12, 112, 24, 24);
         R.textColor(letter, lx, 140, '#e0f8d0', 7, 'center');
       });
 
@@ -538,18 +552,18 @@ function drawLesson() {
       const letter = currentSign();
       R.textColor(`SIGN '${letter}'`, R.width / 2, 28, '#e0f8d0', 10, 'center');
 
-      // Large SVG reference image
+      // Large SVG reference image — flipped to match mirror/camera view
       const img = signImages[letter];
       const imgSize = 100;
       const imgX = (R.width - imgSize) / 2;
       const imgY = 50;
       R.rectColor(imgX - 3, imgY - 3, imgSize + 6, imgSize + 6, '#e0f8d0');
       R.strokeRect(imgX - 3, imgY - 3, imgSize + 6, imgSize + 6, 1);
-      if (img?.complete) R.drawImage(img, imgX, imgY, imgSize, imgSize);
+      if (img?.complete) R.drawImageFlipped(img, imgX, imgY, imgSize, imgSize);
 
       // Orientation
       R.textColor(getHandSide(letter), R.width / 2, 158, '#ebcb8b', 5, 'center');
-      R.textColor(getOrientation(letter), R.width / 2, 168, '#ebcb8b', 5, 'center');
+      R.textColor('MIRROR VIEW', R.width / 2, 168, '#555', 5, 'center');
 
       // Description (typewriter)
       const desc = SIGN_DESCRIPTIONS[letter] || '';
@@ -568,55 +582,75 @@ function drawLesson() {
       R.rectColor(camX, camY, camW, camH, '#111');
       R.strokeRect(camX, camY, camW, camH, 2);
 
-      // Draw webcam feed
+      // Draw webcam feed — MIRRORED for natural selfie view
       if (webcamReady && videoEl.readyState >= videoEl.HAVE_ENOUGH_DATA) {
-        R.ctx.drawImage(videoEl, R.px(camX), R.px(camY), R.px(camW), R.px(camH));
-        // Draw hand landmarks
+        R.drawMirrored(videoEl, camX, camY, camW, camH);
+        // Draw hand landmarks mirrored to match
         if (currentLandmarks) {
-          R.drawHandLandmarks(currentLandmarks, camX, camY, camW, camH, '#88c070');
+          const mirrored = currentLandmarks.map(lm => ({ ...lm, x: 1 - lm.x }));
+          R.drawHandLandmarks(mirrored, camX, camY, camW, camH, '#88c070');
         }
       } else {
         R.textColor('CAMERA', R.width / 2, camY + 50, '#333', 8, 'center');
         R.textColor('LOADING...', R.width / 2, camY + 65, '#333', 6, 'center');
       }
 
-      // Ghost hand SVG overlay
+      // Ghost hand SVG overlay — flipped to match mirrored camera
       const ghostImg = signImages[letter];
       if (ghostImg?.complete) {
         const ghostAlpha = 0.2 + Math.sin(sceneTimer / 400) * 0.08;
-        R.drawImageAlpha(ghostImg, camX + camW / 2 - 35, camY + 10, 70, 70, ghostAlpha);
+        R.drawImageFlippedAlpha(ghostImg, camX + camW / 2 - 35, camY + 10, 70, 70, ghostAlpha);
       }
 
-      // Orientation reminder
-      R.textColor(getOrientation(letter), R.width / 2, 160, '#ebcb8b', 5, 'center');
-
       // Status text
-      R.rectColor(0, 170, R.width, 16, '#081820');
+      R.rectColor(0, 160, R.width, 16, '#081820');
       if (!handDetected) {
-        R.textColor('SHOW YOUR HAND!', R.width / 2, 172, '#e05050', 8, 'center');
+        R.textColor('SHOW YOUR HAND!', R.width / 2, 162, '#e05050', 8, 'center');
       } else if (holdTimer > 0) {
-        R.textColor('HOLD IT...', R.width / 2, 172, '#ebcb8b', 8, 'center');
+        R.textColor('HOLD IT...', R.width / 2, 162, '#ebcb8b', 8, 'center');
       } else {
-        R.textColor(`SIGN '${letter}' NOW!`, R.width / 2, 172, '#e0f8d0', 8, 'center');
+        R.textColor(`SIGN '${letter}' NOW!`, R.width / 2, 162, '#e0f8d0', 8, 'center');
       }
 
       // Hold progress bar
       const holdProg = holdTimer / HOLD_REQUIRED;
-      R.textColor('HOLD', 10, 194, '#555', 5);
-      R.progressBarColor(34, 194, R.width - 44, 8, holdProg, '#1a1a1a', holdProg > 0.8 ? '#88c070' : '#346856');
+      R.textColor('HOLD', 10, 182, '#555', 5);
+      R.progressBarColor(34, 182, R.width - 44, 8, holdProg, '#1a1a1a', holdProg > 0.8 ? '#88c070' : '#346856');
 
       // Time remaining bar
       const timeProg = 1 - lessonTimer / ATTEMPT_TIMEOUT;
-      R.textColor('TIME', 10, 208, '#555', 5);
-      R.progressBarColor(34, 208, R.width - 44, 8, timeProg, '#1a1a1a', timeProg > 0.3 ? '#346856' : '#e05050');
+      R.textColor('TIME', 10, 196, '#555', 5);
+      R.progressBarColor(34, 196, R.width - 44, 8, timeProg, '#1a1a1a', timeProg > 0.3 ? '#346856' : '#e05050');
 
-      // Sign reference small image
+      // Sign reference small image — flipped to match mirror
       const refImg = signImages[letter];
       if (refImg?.complete) {
-        R.rectColor(R.width - 42, 224, 36, 36, '#1a3a2a');
-        R.drawImage(refImg, R.width - 40, 226, 32, 32);
+        R.rectColor(R.width - 42, 212, 36, 36, '#1a3a2a');
+        R.drawImageFlipped(refImg, R.width - 40, 214, 32, 32);
       }
-      R.textColor(`'${letter}'`, R.width - 24, 262, '#88c070', 6, 'center');
+      R.textColor(`'${letter}'`, R.width - 24, 250, '#88c070', 6, 'center');
+      R.textColor(getOrientation(letter), R.width - 24, 260, '#555', 3, 'center');
+
+      // Real-time coaching hints — tell user what to fix
+      const feedback = getSignFeedback(currentLandmarks, letter);
+      if (feedback.length > 0 && handDetected) {
+        R.rectColor(4, 212, 94, 44, 'rgba(0,0,0,0.75)');
+        R.textColor('FIX:', 6, 214, '#e05050', 5);
+        const maxHints = Math.min(3, feedback.length);
+        for (let i = 0; i < maxHints; i++) {
+          R.textColor(feedback[i], 6, 224 + i * 10, '#ebcb8b', 4);
+        }
+      } else if (handDetected && holdTimer > 0) {
+        R.rectColor(4, 212, 94, 16, 'rgba(0,0,0,0.75)');
+        R.textColor('LOOKING GOOD!', 6, 214, '#88c070', 5);
+      }
+
+      // Compact debug — what signs match
+      const debug = getHandDebugInfo(currentLandmarks);
+      if (debug) {
+        const matchStr = debug.matches.length > 0 ? debug.matches.join(' ') : '-';
+        R.textColor(`DETECTED: ${matchStr}`, 6, 272, '#444', 4);
+      }
       break;
     }
 
@@ -627,7 +661,7 @@ function drawLesson() {
       R.textColor(`'${letter}' MASTERED`, R.width / 2, 90, '#e0f8d0', 8, 'center');
 
       const img = signImages[letter];
-      if (img?.complete) R.drawImage(img, R.width / 2 - 30, 110, 60, 60);
+      if (img?.complete) R.drawImageFlipped(img, R.width / 2 - 30, 110, 60, 60);
 
       R.textColor(`+${Math.floor(lessonData.xp / lessonData.signs.length)} XP`, R.width / 2, 180, '#ebcb8b', 8, 'center');
 
@@ -641,7 +675,7 @@ function drawLesson() {
       R.textColor(`THE SIGN FOR '${letter}':`, R.width / 2, 80, '#e0f8d0', 6, 'center');
 
       const img = signImages[letter];
-      if (img?.complete) R.drawImage(img, R.width / 2 - 35, 95, 70, 70);
+      if (img?.complete) R.drawImageFlipped(img, R.width / 2 - 35, 95, 70, 70);
 
       R.textColor(getOrientation(letter), R.width / 2, 172, '#ebcb8b', 5, 'center');
 
@@ -711,8 +745,13 @@ function drawComplete() {
   // Streak
   if (sceneTimer > 2200) {
     const st = State.getState();
-    R.textColor('\u{1F525}', R.width / 2 - 20, 150, '#e8c170', 10);
-    R.textColor(`${st.streak} day streak!`, R.width / 2, 154, '#e8c170', 6, 'center');
+    // Measure the centered text so the flame sits just left of its actual left
+    // edge — a fixed offset drifts as the streak grows from 1 to 3 digits.
+    const streakText = `${st.streak} DAY STREAK!`;
+    const textW = R.measureText(streakText, 6);
+    R.textColor(streakText, R.width / 2, 154, '#e8c170', 6, 'center');
+    const flicker = Math.sin(sceneTimer / 120) > 0 ? 0 : 1;
+    R.flame(R.width / 2 - textW / 2 - 11, 150, 1, flicker);
   }
 
   // Signs learned
