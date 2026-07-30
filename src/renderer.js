@@ -82,6 +82,13 @@ export class Renderer {
     this.ctx.strokeRect(this.px(x), this.px(y), this.px(w), this.px(h));
   }
 
+  // Same, but with an explicit colour instead of a palette index.
+  strokeRectColor(x, y, w, h, color) {
+    this.ctx.strokeStyle = color;
+    this.ctx.lineWidth = this.scale;
+    this.ctx.strokeRect(this.px(x), this.px(y), this.px(w), this.px(h));
+  }
+
   circle(cx, cy, r, colorIndex) {
     this.ctx.fillStyle = this.palette[colorIndex];
     this.ctx.beginPath();

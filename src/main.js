@@ -20,14 +20,24 @@ SIGN_LETTERS.forEach(letter => {
   signImages[letter] = img;
 });
 
+// Largest rect with the source's aspect ratio that fits in the box, centred.
+function fitContain(srcW, srcH, x, y, w, h) {
+  const scale = Math.min(w / srcW, h / srcH);
+  const fw = srcW * scale, fh = srcH * scale;
+  return { x: x + (w - fw) / 2, y: y + (h - fh) / 2, w: fw, h: fh };
+}
+
 // Draw a sign reference. Prefers the SVG photo-trace, but several of the shipped
 // SVGs are actually saved error pages that fail to decode — so fall back to the
 // procedural hand in handdraw.js rather than leaving an empty box.
 function drawSign(letter, x, y, w, h, { flipped = true, alpha = 1 } = {}) {
   const img = signImages[letter];
-  const drew = alpha < 1
-    ? (flipped ? R.drawImageFlippedAlpha(img, x, y, w, h, alpha) : R.drawImageAlpha(img, x, y, w, h, alpha))
-    : (flipped ? R.drawImageFlipped(img, x, y, w, h) : R.drawImage(img, x, y, w, h));
+  // The source traces aren't square — most are roughly 1:2 portrait and Y is
+  // landscape — so fit them inside the box instead of stretching to fill it.
+  const box = Renderer.usable(img) ? fitContain(img.naturalWidth, img.naturalHeight, x, y, w, h) : null;
+  const drew = box && (alpha < 1
+    ? (flipped ? R.drawImageFlippedAlpha(img, box.x, box.y, box.w, box.h, alpha) : R.drawImageAlpha(img, box.x, box.y, box.w, box.h, alpha))
+    : (flipped ? R.drawImageFlipped(img, box.x, box.y, box.w, box.h) : R.drawImage(img, box.x, box.y, box.w, box.h)));
   if (drew) return;
 
   R.ctx.save();
@@ -1131,7 +1141,12 @@ function consumeMuteTap() {
 }
 
 function drawMuteToggle() {
-  R.speakerIcon(MUTE_ICON.x, MUTE_ICON.y, 1, isMuted(), isMuted() ? '#e05050' : '#88c070');
+  const muted = isMuted();
+  // Opaque chip behind the glyph: the profile's lesson list and the lesson HUD
+  // run underneath it, and without a backing the icon gets lost in the text.
+  R.rectColor(141, 268, 15, 15, '#081820');
+  R.strokeRectColor(141, 268, 15, 15, muted ? '#5a1a1a' : '#1a3a2a');
+  R.speakerIcon(MUTE_ICON.x, MUTE_ICON.y, 1, muted, muted ? '#e05050' : '#88c070');
 }
 
 // ─── Game Loop ─────────────────────────────────────────
@@ -1171,13 +1186,15 @@ function stepFrame(time) {
     }
   }
 
-  // Update scene. The music toggle gets first look at the tap so it works from
-  // every scene without each one having to know about it.
-  if (transitionPhase === 'none' || transitionPhase === 'opening') {
-    if (!consumeMuteTap()) {
-      const update = sceneUpdates[scene];
-      if (update) update(dt);
-    }
+  // The music toggle gets first look at the tap, so it works from every scene
+  // without each one having to know about it. Checked outside the transition
+  // gate as well: it isn't navigation, so it shouldn't go dead during a wipe.
+  const muteTapped = consumeMuteTap();
+
+  // Update scene
+  if (!muteTapped && (transitionPhase === 'none' || transitionPhase === 'opening')) {
+    const update = sceneUpdates[scene];
+    if (update) update(dt);
   }
 
   // Draw. Reset transform/alpha up front: if a previous frame threw between
