@@ -2,7 +2,7 @@
 import { Renderer } from './renderer.js';
 import { SFX, playBGM, toggleMute, isMuted } from './audio.js';
 import { detectSign, SIGN_DESCRIPTIONS, getHandDebugInfo, getSignFeedback } from './signs.js';
-import { getOrientation, getHandSide } from './handdraw.js';
+import { getOrientation, getHandSide, drawHandSign } from './handdraw.js';
 import * as State from './gamestate.js';
 
 // ─── Setup ─────────────────────────────────────────────
@@ -19,6 +19,25 @@ SIGN_LETTERS.forEach(letter => {
   img.src = `/signs/${letter}.svg`;
   signImages[letter] = img;
 });
+
+// Draw a sign reference. Prefers the SVG photo-trace, but several of the shipped
+// SVGs are actually saved error pages that fail to decode — so fall back to the
+// procedural hand in handdraw.js rather than leaving an empty box.
+function drawSign(letter, x, y, w, h, { flipped = true, alpha = 1 } = {}) {
+  const img = signImages[letter];
+  const drew = alpha < 1
+    ? (flipped ? R.drawImageFlippedAlpha(img, x, y, w, h, alpha) : R.drawImageAlpha(img, x, y, w, h, alpha))
+    : (flipped ? R.drawImageFlipped(img, x, y, w, h) : R.drawImage(img, x, y, w, h));
+  if (drew) return;
+
+  R.ctx.save();
+  R.ctx.globalAlpha = alpha;
+  // handdraw draws around a centre point, in device pixels
+  R.ctx.translate(R.px(x + w / 2), R.px(y + h / 2));
+  if (flipped) R.ctx.scale(-1, 1);
+  drawHandSign(R.ctx, letter, 0, 0, R.px(Math.min(w, h)));
+  R.ctx.restore();
+}
 
 // ─── Input System ──────────────────────────────────────
 let tapX = -1, tapY = -1, tapped = false;
@@ -206,7 +225,7 @@ function drawHome() {
 
   // ASL hand icon
   const img = signImages['A'];
-  if (img?.complete) R.drawImage(img, 60, 88, 40, 40);
+  drawSign('A', 60, 88, 40, 40, { flipped: false });
 
   // Streak
   const st = State.getState();
@@ -547,7 +566,7 @@ function drawLesson() {
         const lx = startX + i * spacing + spacing / 2;
         R.rectColor(lx - 14, 110, 28, 34, '#1a3a2a');
         const img = signImages[letter];
-        if (img?.complete) R.drawImageFlipped(img, lx - 12, 112, 24, 24);
+        drawSign(letter, lx - 12, 112, 24, 24);
         R.textColor(letter, lx, 140, '#e0f8d0', 7, 'center');
       });
 
@@ -567,7 +586,7 @@ function drawLesson() {
       const imgY = 50;
       R.rectColor(imgX - 3, imgY - 3, imgSize + 6, imgSize + 6, '#e0f8d0');
       R.strokeRect(imgX - 3, imgY - 3, imgSize + 6, imgSize + 6, 1);
-      if (img?.complete) R.drawImageFlipped(img, imgX, imgY, imgSize, imgSize);
+      drawSign(letter, imgX, imgY, imgSize, imgSize);
 
       // Orientation
       R.textColor(getHandSide(letter), R.width / 2, 158, '#ebcb8b', 5, 'center');
@@ -603,12 +622,9 @@ function drawLesson() {
         R.textColor('LOADING...', R.width / 2, camY + 65, '#333', 6, 'center');
       }
 
-      // Ghost hand SVG overlay — flipped to match mirrored camera
-      const ghostImg = signImages[letter];
-      if (ghostImg?.complete) {
-        const ghostAlpha = 0.2 + Math.sin(sceneTimer / 400) * 0.08;
-        R.drawImageFlippedAlpha(ghostImg, camX + camW / 2 - 35, camY + 10, 70, 70, ghostAlpha);
-      }
+      // Ghost hand overlay — flipped to match mirrored camera
+      const ghostAlpha = 0.2 + Math.sin(sceneTimer / 400) * 0.08;
+      drawSign(letter, camX + camW / 2 - 35, camY + 10, 70, 70, { alpha: ghostAlpha });
 
       // Status text
       R.rectColor(0, 160, R.width, 16, '#081820');
@@ -630,12 +646,9 @@ function drawLesson() {
       R.textColor('TIME', 10, 196, '#555', 5);
       R.progressBarColor(34, 196, R.width - 44, 8, timeProg, '#1a1a1a', timeProg > 0.3 ? '#346856' : '#e05050');
 
-      // Sign reference small image — flipped to match mirror
-      const refImg = signImages[letter];
-      if (refImg?.complete) {
-        R.rectColor(R.width - 42, 212, 36, 36, '#1a3a2a');
-        R.drawImageFlipped(refImg, R.width - 40, 214, 32, 32);
-      }
+      // Sign reference thumbnail — flipped to match mirror
+      R.rectColor(R.width - 42, 212, 36, 36, '#1a3a2a');
+      drawSign(letter, R.width - 40, 214, 32, 32);
       R.textColor(`'${letter}'`, R.width - 24, 250, '#88c070', 6, 'center');
       R.textColor(getOrientation(letter), R.width - 24, 260, '#555', 3, 'center');
 
@@ -669,7 +682,7 @@ function drawLesson() {
       R.textColor(`'${letter}' MASTERED`, R.width / 2, 90, '#e0f8d0', 8, 'center');
 
       const img = signImages[letter];
-      if (img?.complete) R.drawImageFlipped(img, R.width / 2 - 30, 110, 60, 60);
+      drawSign(letter, R.width / 2 - 30, 110, 60, 60);
 
       R.textColor(`+${Math.floor(lessonData.xp / lessonData.signs.length)} XP`, R.width / 2, 180, '#ebcb8b', 8, 'center');
 
@@ -683,7 +696,7 @@ function drawLesson() {
       R.textColor(`THE SIGN FOR '${letter}':`, R.width / 2, 80, '#e0f8d0', 6, 'center');
 
       const img = signImages[letter];
-      if (img?.complete) R.drawImageFlipped(img, R.width / 2 - 35, 95, 70, 70);
+      drawSign(letter, R.width / 2 - 35, 95, 70, 70);
 
       R.textColor(getOrientation(letter), R.width / 2, 172, '#ebcb8b', 5, 'center');
 
@@ -1062,7 +1075,7 @@ function drawQuiz() {
     const ix = (R.width - size) / 2, iy = 58;
     R.rectColor(ix - 3, iy - 3, size + 6, size + 6, '#e0f8d0');
     // Mirrored to match the selfie view the learner practises against
-    if (img?.complete) R.drawImageFlipped(img, ix, iy, size, size);
+    drawSign(q.answer, ix, iy, size, size);
     rects.forEach((r, i) => {
       const state = quizChoiceState(q, i);
       R.rectColor(r.x, r.y, r.w, r.h, state.bg);
@@ -1077,7 +1090,7 @@ function drawQuiz() {
       R.rectColor(r.x - 2, r.y - 2, r.w + 4, r.h + 4, state.bg);
       R.rectColor(r.x, r.y, r.w, r.h, '#e0f8d0');
       const img = signImages[q.choices[i]];
-      if (img?.complete) R.drawImageFlipped(img, r.x + 2, r.y + 2, r.w - 4, r.h - 4);
+      drawSign(q.choices[i], r.x + 2, r.y + 2, r.w - 4, r.h - 4);
     });
   }
 
@@ -1124,7 +1137,24 @@ function drawMuteToggle() {
 // ─── Game Loop ─────────────────────────────────────────
 let lastTime = 0;
 
+let loopErrorLogged = false;
+
+// A throw anywhere in here used to skip the requestAnimationFrame at the bottom,
+// which killed the loop for good: the last frame stayed on screen and every
+// button went dead. Always re-arm, and report the first failure.
 function gameLoop(time) {
+  try {
+    stepFrame(time);
+  } catch (e) {
+    if (!loopErrorLogged) {
+      loopErrorLogged = true;
+      console.error('[SignalQuest] frame failed; loop continues', e);
+    }
+  }
+  requestAnimationFrame(gameLoop);
+}
+
+function stepFrame(time) {
   const dt = lastTime ? Math.min(time - lastTime, 100) : 16;
   lastTime = time;
 
@@ -1150,7 +1180,10 @@ function gameLoop(time) {
     }
   }
 
-  // Draw
+  // Draw. Reset transform/alpha up front: if a previous frame threw between
+  // save() and restore(), its state would otherwise leak into this one.
+  R.ctx.setTransform(1, 0, 0, 1, 0, 0);
+  R.ctx.globalAlpha = 1;
   R.ctx.save();
   R.applyEffects(dt);
 
@@ -1169,8 +1202,6 @@ function gameLoop(time) {
   }
 
   R.ctx.restore();
-
-  requestAnimationFrame(gameLoop);
 }
 
 // ─── Init ──────────────────────────────────────────────

@@ -192,46 +192,60 @@ export class Renderer {
     }
   }
 
+  // `complete` is true for a FAILED load too, and drawing a broken image throws
+  // InvalidStateError. naturalWidth is the only reliable "actually decoded" test.
+  // Every draw returns whether it painted, so callers can fall back.
+  static usable(img) {
+    return !!img && img.complete && img.naturalWidth > 0;
+  }
+
   // Draw an image in logical coords
   drawImage(img, x, y, w, h) {
-    if (!img || !img.complete) return;
+    if (!Renderer.usable(img)) return false;
     this.ctx.drawImage(img, this.px(x), this.px(y), this.px(w), this.px(h));
+    return true;
   }
 
   drawImageAlpha(img, x, y, w, h, alpha) {
-    if (!img || !img.complete) return;
+    if (!Renderer.usable(img)) return false;
     this.ctx.globalAlpha = alpha;
     this.ctx.drawImage(img, this.px(x), this.px(y), this.px(w), this.px(h));
     this.ctx.globalAlpha = 1;
+    return true;
   }
 
   // Draw image flipped horizontally (mirror) — for matching selfie camera view
   drawImageFlipped(img, x, y, w, h) {
-    if (!img || !img.complete) return;
+    if (!Renderer.usable(img)) return false;
     this.ctx.save();
     this.ctx.translate(this.px(x) + this.px(w), this.px(y));
     this.ctx.scale(-1, 1);
     this.ctx.drawImage(img, 0, 0, this.px(w), this.px(h));
     this.ctx.restore();
+    return true;
   }
 
   drawImageFlippedAlpha(img, x, y, w, h, alpha) {
-    if (!img || !img.complete) return;
+    if (!Renderer.usable(img)) return false;
     this.ctx.save();
     this.ctx.globalAlpha = alpha;
     this.ctx.translate(this.px(x) + this.px(w), this.px(y));
     this.ctx.scale(-1, 1);
     this.ctx.drawImage(img, 0, 0, this.px(w), this.px(h));
     this.ctx.restore();
+    return true;
   }
 
   // Draw video/image mirrored within a specific region (for webcam selfie mode)
   drawMirrored(img, x, y, w, h) {
+    // A <video> has no naturalWidth; videoWidth is the equivalent readiness test.
+    if (!img || !(img.videoWidth || img.naturalWidth)) return false;
     this.ctx.save();
     this.ctx.translate(this.px(x) + this.px(w), this.px(y));
     this.ctx.scale(-1, 1);
     this.ctx.drawImage(img, 0, 0, this.px(w), this.px(h));
     this.ctx.restore();
+    return true;
   }
 
   progressBar(x, y, w, h, progress, bgColor = 0, fillColor = 2) {
