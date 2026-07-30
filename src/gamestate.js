@@ -1,7 +1,7 @@
 // Duolingo-style game state — streaks, XP, lesson progress, spaced repetition
 
 const SAVE_KEY = 'signalquest_save';
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 
 // Lesson curriculum
 export const LESSONS = [
@@ -25,6 +25,11 @@ function createDefault() {
     bestStars: {},          // { lessonId: 1-3 } best star rating per lesson
     checkpointsPassed: [],  // lesson ids whose review checkpoint was cleared
     quizStats: {},          // { letter: { seen, correct } } receptive accuracy
+    // { letter: { seen, correct, lastSeen: epochMs, halfLifeDays } }
+    // Memory strength per sign. Deliberately separate from masteredSigns,
+    // which stays a permanent "have I ever learned this" set for the map and
+    // the signs-mastered count.
+    signStrength: {},
     schemaVersion: SCHEMA_VERSION,
   };
 }
@@ -59,6 +64,19 @@ export function loadState() {
   // checkpoint the player hasn't cleared yet.
   if (raw.schemaVersion === undefined) {
     state.checkpointsPassed = [...state.completedLessons];
+  }
+  // v2 seeds memory strength for signs learned before it existed. lastSeen is
+  // set to now rather than backdated: we don't know when they were practised,
+  // and guessing old would dump everything into review on first launch.
+  if ((raw.schemaVersion ?? 0) < 2) {
+    const now = Date.now();
+    for (const letter of state.masteredSigns) {
+      if (!state.signStrength[letter]) {
+        state.signStrength[letter] = { seen: 1, correct: 1, lastSeen: now, halfLifeDays: 1 };
+      }
+    }
+  }
+  if ((raw.schemaVersion ?? 0) < SCHEMA_VERSION) {
     state.schemaVersion = SCHEMA_VERSION;
     saveState();
   }
@@ -129,6 +147,54 @@ export function recordQuizAnswer(letter, correct) {
   if (correct) s.correct++;
   state.quizStats[letter] = s;
   saveState();
+}
+
+// ─── Memory strength (spaced repetition) ───
+// A simplified half-life model, after Duolingo's half-life regression: recall
+// decays exponentially, and each answer scales the half-life rather than
+// setting a fixed next-review date. Getting something right pushes it further
+// out; getting it wrong pulls it sharply back in.
+const DAY_MS = 86400000;
+const INITIAL_HALF_LIFE = 0.5;   // days — a brand new sign comes back the same day
+const MIN_HALF_LIFE = 0.2;
+const MAX_HALF_LIFE = 60;
+const DUE_THRESHOLD = 0.7;       // predicted recall below this counts as due
+
+export function recordPractice(letter, correct) {
+  const s = state.signStrength[letter]
+    || { seen: 0, correct: 0, lastSeen: 0, halfLifeDays: INITIAL_HALF_LIFE };
+  s.seen++;
+  if (correct) {
+    s.correct++;
+    s.halfLifeDays = Math.min(MAX_HALF_LIFE, s.halfLifeDays * 2);
+  } else {
+    // Lapses cost more than successes gain — a missed sign should come back soon
+    s.halfLifeDays = Math.max(MIN_HALF_LIFE, s.halfLifeDays * 0.4);
+  }
+  s.lastSeen = Date.now();
+  state.signStrength[letter] = s;
+  saveState();
+}
+
+// Predicted chance of recalling this sign right now, 0..1.
+export function recallProbability(letter, now = Date.now()) {
+  const s = state.signStrength[letter];
+  if (!s) return 0;
+  const days = (now - s.lastSeen) / DAY_MS;
+  return Math.pow(2, -days / s.halfLifeDays);
+}
+
+// Learned signs whose predicted recall has decayed, weakest first.
+export function getDueSigns(now = Date.now()) {
+  return getLearnedSigns()
+    .map(letter => ({ letter, recall: recallProbability(letter, now) }))
+    .filter(x => x.recall < DUE_THRESHOLD)
+    .sort((a, b) => a.recall - b.recall)
+    .map(x => x.letter);
+}
+
+export function getDueCount(now = Date.now()) {
+  return getDueSigns(now).length;
 }
 
 // A lesson that's been completed but whose checkpoint hasn't been cleared yet.

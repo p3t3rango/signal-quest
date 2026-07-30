@@ -188,6 +188,8 @@ function finishTransition() {
 }
 
 // ─── Scene: Home ───────────────────────────────────────
+let homeDueCount = 0;
+
 function initHome() {
   playBGM('lofi');
 }
@@ -199,11 +201,23 @@ function updateHome(dt) {
   // lesson, so CONTINUE has to lead there rather than into a locked door.
   const pendingCheckpoint = State.getPendingCheckpointId();
   const nextId = State.getNextLessonId();
+  homeDueCount = State.getDueCount();
+
+  // The PRACTICE row only exists when something has actually decayed, so the
+  // menu stays three buttons on a normal day. Lay out from the top so the rows
+  // close up when it's absent.
+  let y = homeDueCount ? 164 : 170;
   if (pendingCheckpoint || nextId) {
-    btn('continue', 30, 170, 100, 22, pendingCheckpoint ? 'REVIEW' : 'CONTINUE', 'primary');
+    btn('continue', 30, y, 100, 22, pendingCheckpoint ? 'REVIEW' : 'CONTINUE', 'primary');
+    y += 28;
   }
-  btn('lessons', 30, 200, 100, 18, 'LESSONS', 'secondary');
-  btn('profile', 30, 226, 100, 18, 'PROFILE', 'secondary');
+  if (homeDueCount) {
+    btn('practice', 30, y, 100, 18, `PRACTICE (${homeDueCount})`, 'secondary');
+    y += 24;
+  }
+  btn('lessons', 30, y, 100, 18, 'LESSONS', 'secondary');
+  y += 26;
+  btn('profile', 30, y, 100, 18, 'PROFILE', 'secondary');
 
   const go = () => {
     SFX.select();
@@ -215,6 +229,7 @@ function updateHome(dt) {
   if (tap) {
     const b = hitButton(tap.x, tap.y);
     if (b?.id === 'continue' && (pendingCheckpoint || nextId)) go();
+    else if (b?.id === 'practice') { SFX.select(); goTo('quiz', { lessonId: 0, mode: 'practice' }); }
     else if (b?.id === 'lessons') { SFX.select(); goTo('map'); }
     else if (b?.id === 'profile') { SFX.select(); goTo('profile'); }
   }
@@ -464,6 +479,7 @@ function updateLesson(dt) {
         SFX.wrong();
         R.shake(4, 300);
         R.flash('#e05050', 150);
+        State.recordPractice(letter, false);   // couldn't produce it — bring it back sooner
         const remaining = State.loseHeart();
         if (remaining <= 0) {
           lessonPhase = 'wrong';
@@ -521,6 +537,7 @@ function succeedSign(letter) {
   SFX.success();
   R.flash('#88c070', 200);
   State.masterSign(letter);
+  State.recordPractice(letter, true);   // expressive success strengthens recall
   lessonPhase = 'correct';
   lessonTimer = 0;
 }
@@ -906,6 +923,7 @@ const CONFUSABLE = {
 
 const QUIZ_LEN = 8;
 const QUIZ_MAX_MISSES = 1;   // misses allowed before a checkpoint fails
+const MAX_REQUEUES_PER_SIGN = 2;   // keeps a repeatedly-missed sign from looping forever
 const FEEDBACK_MS = 900;
 
 let quizQueue = [];
@@ -917,6 +935,7 @@ let quizLastCorrect = false;
 let quizPickedIdx = -1;
 let quizLessonId = 0;
 let quizTotal = QUIZ_LEN;
+let quizMode = 'checkpoint';   // 'checkpoint' gates the next lesson | 'practice' is free review
 
 function shuffle(list) {
   const arr = [...list];
@@ -952,8 +971,14 @@ function buildQuizQuestions(pool, n) {
 
 function initQuiz(data) {
   quizLessonId = data.lessonId;
+  quizMode = data.mode === 'practice' ? 'practice' : 'checkpoint';
   const learned = State.getLearnedSigns();
-  const pool = (data.signs?.length ? data.signs : learned).filter(l => SIGN_LETTERS.includes(l));
+  // Practice mode drills what's closest to being forgotten, so a short session
+  // cycles tightly over the weak signs. A checkpoint tests everything learned
+  // so far, so it can gate the next lesson fairly.
+  const due = State.getDueSigns();
+  const basePool = quizMode === 'practice' && due.length ? due : learned;
+  const pool = (data.signs?.length ? data.signs : basePool).filter(l => SIGN_LETTERS.includes(l));
   quizQueue = buildQuizQuestions(pool, QUIZ_LEN);
   quizTotal = quizQueue.length;
   quizIndex = 0;
@@ -972,6 +997,13 @@ function quizPassed() { return quizFirstTryMisses <= QUIZ_MAX_MISSES; }
 function enterQuizResult() {
   quizPhase = 'result';
   sceneTimer = 0;
+  if (quizMode === 'practice') {
+    // Free review: strength was already updated per answer, and there's nothing
+    // to unlock. Pay out for the effort rather than pass/fail the session.
+    State.addXP(5);
+    SFX.badge();
+    return;
+  }
   if (quizPassed()) {
     State.passCheckpoint(quizLessonId);
     State.addXP(10);
@@ -998,6 +1030,8 @@ function answerQuiz(idx) {
   quizPickedIdx = idx;
   quizLastCorrect = correct;
   State.recordQuizAnswer(q.answer, correct);
+  // Receptive answers move the same memory strength the expressive practice does
+  State.recordPractice(q.answer, correct);
 
   if (correct) {
     SFX.success();
@@ -1006,9 +1040,14 @@ function answerQuiz(idx) {
     // Requeued items are the second look at something already missed — don't
     // let one mistake count twice against the checkpoint.
     if (!q.requeued) quizFirstTryMisses++;
-    // Re-ask a missed sign a few questions later, still in this session
-    const insertAt = Math.min(quizQueue.length, quizIndex + 3);
-    quizQueue.splice(insertAt, 0, { ...q, choices: shuffle(q.choices), requeued: true });
+    // Re-ask a missed sign a few questions later, still in this session — but
+    // bounded. Requeueing unconditionally means someone who keeps missing the
+    // same sign never reaches the end of the session.
+    const requeues = (q.requeues || 0) + 1;
+    if (requeues <= MAX_REQUEUES_PER_SIGN && quizQueue.length < QUIZ_LEN * 2) {
+      const insertAt = Math.min(quizQueue.length, quizIndex + 3);
+      quizQueue.splice(insertAt, 0, { ...q, choices: shuffle(q.choices), requeued: true, requeues });
+    }
   }
   quizPhase = 'feedback';
   quizFeedbackTimer = 0;
@@ -1030,15 +1069,16 @@ function updateQuiz(dt) {
   }
 
   if (quizPhase === 'result') {
-    const passed = quizPassed();
-    btn('done', 30, 230, 100, 22, passed ? 'CONTINUE' : 'TRY AGAIN', 'primary');
+    // Practice has no pass/fail — there's nothing to retry into.
+    const canLeave = quizMode === 'practice' || quizPassed();
+    btn('done', 30, 230, 100, 22, canLeave ? 'CONTINUE' : 'TRY AGAIN', 'primary');
     const tap = consumeTap();
     const key = keys['z'] || keys['Enter'];
     if ((tap && hitButton(tap.x, tap.y)?.id === 'done') || key) {
       keys['z'] = false; keys['Enter'] = false;
       SFX.select();
-      if (passed) goTo('home');
-      else goTo('quiz', { lessonId: quizLessonId });
+      if (canLeave) goTo('home');
+      else goTo('quiz', { lessonId: quizLessonId, mode: quizMode });
     }
     return;
   }
@@ -1064,17 +1104,28 @@ function drawQuiz() {
   R.clear(0);
 
   if (quizPhase === 'result') {
-    const passed = quizPassed();
-    R.textColor(passed ? 'CHECKPOINT' : 'NOT QUITE', R.width / 2, 60, passed ? '#88c070' : '#e05050', 10, 'center');
-    R.textColor(passed ? 'CLEARED!' : 'KEEP GOING', R.width / 2, 78, passed ? '#e0f8d0' : '#ebcb8b', 10, 'center');
-    R.textColor(`${quizTotal - quizFirstTryMisses}/${quizTotal} FIRST TRY`, R.width / 2, 120, '#88c070', 6, 'center');
-    if (passed) {
-      R.textColor('+10 XP', R.width / 2, 140, '#e8c170', 8, 'center');
-      R.textColor('NEXT LESSON', R.width / 2, 168, '#88c070', 5, 'center');
-      R.textColor('UNLOCKED', R.width / 2, 178, '#88c070', 5, 'center');
+    const score = `${quizTotal - quizFirstTryMisses}/${quizTotal} FIRST TRY`;
+    if (quizMode === 'practice') {
+      R.textColor('PRACTICE', R.width / 2, 60, '#88c070', 10, 'center');
+      R.textColor('DONE!', R.width / 2, 78, '#e0f8d0', 10, 'center');
+      R.textColor(score, R.width / 2, 120, '#88c070', 6, 'center');
+      R.textColor('+5 XP', R.width / 2, 140, '#e8c170', 8, 'center');
+      const left = State.getDueCount();
+      R.textColor(left ? `${left} STILL DUE` : 'ALL CAUGHT UP', R.width / 2, 168,
+        left ? '#ebcb8b' : '#88c070', 5, 'center');
     } else {
-      R.textColor(`MISS ${QUIZ_MAX_MISSES} OR FEWER`, R.width / 2, 150, '#555', 5, 'center');
-      R.textColor('TO UNLOCK', R.width / 2, 160, '#555', 5, 'center');
+      const passed = quizPassed();
+      R.textColor(passed ? 'CHECKPOINT' : 'NOT QUITE', R.width / 2, 60, passed ? '#88c070' : '#e05050', 10, 'center');
+      R.textColor(passed ? 'CLEARED!' : 'KEEP GOING', R.width / 2, 78, passed ? '#e0f8d0' : '#ebcb8b', 10, 'center');
+      R.textColor(score, R.width / 2, 120, '#88c070', 6, 'center');
+      if (passed) {
+        R.textColor('+10 XP', R.width / 2, 140, '#e8c170', 8, 'center');
+        R.textColor('NEXT LESSON', R.width / 2, 168, '#88c070', 5, 'center');
+        R.textColor('UNLOCKED', R.width / 2, 178, '#88c070', 5, 'center');
+      } else {
+        R.textColor(`MISS ${QUIZ_MAX_MISSES} OR FEWER`, R.width / 2, 150, '#555', 5, 'center');
+        R.textColor('TO UNLOCK', R.width / 2, 160, '#555', 5, 'center');
+      }
     }
     drawButtons();
     return;
@@ -1086,7 +1137,7 @@ function drawQuiz() {
   // Progress
   R.textColor(`${Math.min(quizIndex + 1, quizQueue.length)}/${quizQueue.length}`, R.width - 26, 10, '#555', 5, 'right');
   R.progressBarColor(8, 12, R.width - 58, 5, quizIndex / quizQueue.length, '#1a1a1a', '#346856');
-  R.textColor('REVIEW', 8, 24, '#88c070', 6);
+  R.textColor(quizMode === 'practice' ? 'PRACTICE' : 'REVIEW', 8, 24, '#88c070', 6);
 
   const rects = quizChoiceRects(q.type);
 
