@@ -1,6 +1,6 @@
 // Signal Quest: Color Edition — Mobile-first Duolingo-style ASL trainer
 import { Renderer } from './renderer.js';
-import { SFX, playBGM, toggleMute, isMuted } from './audio.js';
+import { SFX, playBGM, playStinger, toggleMute, isMuted } from './audio.js';
 import { detectSign, SIGN_DESCRIPTIONS, getHandDebugInfo, getSignFeedback } from './signs.js';
 import { getOrientation, getHandSide, drawHandSign } from './handdraw.js';
 import * as State from './gamestate.js';
@@ -539,7 +539,7 @@ function drawLesson() {
   // Top bar: progress dots + hearts
   R.rect(0, 0, R.width, 18, 1);
   const st = State.getState();
-  R.hearts(R.width - 42, 4, st.hearts, st.maxHearts);
+  R.hearts(R.width - 60, 4, st.hearts, st.maxHearts);
 
   // Progress dots
   if (lessonData) {
@@ -729,7 +729,9 @@ function initComplete(data) {
   completeStars = data.stars;
   completeXP = data.xp;
   completeLessonId = data.lessonId;
-  SFX.levelClear();
+  // Stinger instead of the looping track: it stops the loop, resolves, and
+  // leaves the screen quiet. The next scene's own playBGM brings music back.
+  playStinger('lessonComplete');
 }
 
 function updateComplete(dt) {
@@ -1072,8 +1074,8 @@ function drawQuiz() {
   if (!q) return;
 
   // Progress
-  R.textColor(`${Math.min(quizIndex + 1, quizQueue.length)}/${quizQueue.length}`, R.width - 8, 10, '#555', 5, 'right');
-  R.progressBarColor(8, 12, R.width - 40, 5, quizIndex / quizQueue.length, '#1a1a1a', '#346856');
+  R.textColor(`${Math.min(quizIndex + 1, quizQueue.length)}/${quizQueue.length}`, R.width - 26, 10, '#555', 5, 'right');
+  R.progressBarColor(8, 12, R.width - 58, 5, quizIndex / quizQueue.length, '#1a1a1a', '#346856');
   R.textColor('REVIEW', 8, 24, '#88c070', 6);
 
   const rects = quizChoiceRects(q.type);
@@ -1126,8 +1128,11 @@ const sceneDraws = { home: drawHome, map: drawMap, lesson: drawLesson, complete:
 // ─── Music toggle (global, all scenes) ─────────────────
 // Hit area is deliberately larger than the 7x7 icon — it has to be thumb-sized
 // on a phone. Bottom-right is the one corner no scene draws into.
-const MUTE_ICON = { x: 145, y: 272 };
-const MUTE_HIT = { x: 138, y: 266, w: 22, h: 22 };
+// Top-right, the conventional home for a sound control. It sits inside the
+// lesson/map/profile header bars, which makes it read as chrome rather than a
+// stray button. The lesson hearts and quiz counter are nudged left to clear it.
+const MUTE_ICON = { x: 146, y: 6 };
+const MUTE_HIT = { x: 139, y: 0, w: 21, h: 20 };
 
 // Returns true if it swallowed the tap, so the scene beneath doesn't also act.
 function consumeMuteTap() {
@@ -1144,8 +1149,8 @@ function drawMuteToggle() {
   const muted = isMuted();
   // Opaque chip behind the glyph: the profile's lesson list and the lesson HUD
   // run underneath it, and without a backing the icon gets lost in the text.
-  R.rectColor(141, 268, 15, 15, '#081820');
-  R.strokeRectColor(141, 268, 15, 15, muted ? '#5a1a1a' : '#1a3a2a');
+  R.rectColor(142, 3, 15, 15, '#081820');
+  R.strokeRectColor(142, 3, 15, 15, muted ? '#5a1a1a' : '#1a3a2a');
   R.speakerIcon(MUTE_ICON.x, MUTE_ICON.y, 1, muted, muted ? '#e05050' : '#88c070');
 }
 

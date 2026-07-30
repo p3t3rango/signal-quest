@@ -323,3 +323,45 @@ export function stopBGM() {
   bgmPattern = null;
   stopHiss();
 }
+
+// ─── Stingers ──────────────────────────────────────────
+// A short one-shot phrase instead of a loop. Plays through the BGM bus, so the
+// mute toggle silences it too — it's music, not a UI sound effect.
+//
+// lessonComplete is a ii-V-I turnaround in C (Dm9 -> G9 -> Cmaj9) under a
+// rising melody, which is about the most satisfying two seconds in tonal music.
+const STINGERS = {
+  lessonComplete: {
+    cutoff: 2400,   // open the filter up — this one should feel bright
+    bass: [{ at: 0.00, n: 'D3' }, { at: 0.42, n: 'G3' }, { at: 0.92, n: 'C3' }],
+    steps: [
+      { at: 0.00, chord: ['D4', 'F4', 'A4', 'C5'], mel: 'A4' },
+      { at: 0.24, mel: 'C5' },
+      { at: 0.42, chord: ['G3', 'B3', 'F4', 'A4'], mel: 'D5' },
+      { at: 0.66, mel: 'E5' },
+      { at: 0.92, chord: ['C4', 'E4', 'G4', 'B4', 'D5'], mel: 'G5' },
+    ],
+  },
+};
+
+export function playStinger(name = 'lessonComplete') {
+  const s = STINGERS[name];
+  if (!s) return;
+  stopBGM();                      // the loop would muddy it
+  const ctx = getCtx();
+  if (ctx.state === 'suspended') ctx.resume();
+  getBgmChain();
+  bgmFilter.frequency.setTargetAtTime(s.cutoff, ctx.currentTime, 0.05);
+
+  const t0 = ctx.currentTime + 0.06;
+  s.bass.forEach(b =>
+    voice(N[b.n], t0 + b.at, 1.7, { type: 'triangle', volume: 0.12, attack: 0.02 }));
+  s.steps.forEach(st => {
+    if (st.chord) st.chord.forEach((nm, i) => {
+      const t = t0 + st.at + i * 0.014;   // slight roll, like a strum
+      voice(N[nm], t, 1.6, { type: 'sine', volume: 0.05, attack: 0.02 });
+      voice(N[nm], t, 1.6, { type: 'triangle', volume: 0.028, detune: 6, attack: 0.03 });
+    });
+    if (st.mel) voice(N[st.mel], t0 + st.at, 0.55, { type: 'square', volume: 0.055, attack: 0.008 });
+  });
+}
