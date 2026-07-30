@@ -924,6 +924,7 @@ const CONFUSABLE = {
 const QUIZ_LEN = 8;
 const QUIZ_MAX_MISSES = 1;   // misses allowed before a checkpoint fails
 const MAX_REQUEUES_PER_SIGN = 2;   // keeps a repeatedly-missed sign from looping forever
+const MAX_PER_LETTER = 2;          // a letter appears at most twice in one session
 const FEEDBACK_MS = 900;
 
 let quizQueue = [];
@@ -958,28 +959,51 @@ function makeQuestion(answer, type) {
   return { type, answer, choices: shuffle([answer, ...pickDistractors(answer, 3)]) };
 }
 
-function buildQuizQuestions(pool, n) {
-  if (!pool.length) return [];
-  const order = shuffle(pool);
-  const qs = [];
-  for (let i = 0; i < n; i++) {
-    // Alternate direction so both reading and naming get practised
-    qs.push(makeQuestion(order[i % order.length], i % 2 === 0 ? 'img2letter' : 'letter2img'));
+// Build a session of AT MOST n questions.
+//
+// `primary` is what the session is about (the due signs, or everything learned
+// for a checkpoint); `pad` is other learned signs used to fill it out. A letter
+// never appears more than MAX_PER_LETTER times, and when there isn't enough
+// material the session is short rather than repetitive — cycling the pool to
+// hit a fixed count turned one due sign into the same question eight times.
+function buildQuizQuestions(primary, pad, n) {
+  const picks = [];
+  for (let pass = 0; pass < MAX_PER_LETTER; pass++) {
+    for (const letter of primary) if (picks.length < n) picks.push(letter);
   }
-  return shuffle(qs);
+  for (const letter of shuffle(pad)) if (picks.length < n) picks.push(letter);
+  if (!picks.length) return [];
+
+  const seen = new Map();
+  return shuffle(picks).map(letter => {
+    const nth = seen.get(letter) || 0;
+    seen.set(letter, nth + 1);
+    // A letter's second appearance flips direction, so seeing it twice means
+    // reading it once and naming it once — not the same question twice.
+    return makeQuestion(letter, nth % 2 === 0 ? 'img2letter' : 'letter2img');
+  });
 }
 
 function initQuiz(data) {
   quizLessonId = data.lessonId;
   quizMode = data.mode === 'practice' ? 'practice' : 'checkpoint';
-  const learned = State.getLearnedSigns();
-  // Practice mode drills what's closest to being forgotten, so a short session
-  // cycles tightly over the weak signs. A checkpoint tests everything learned
-  // so far, so it can gate the next lesson fairly.
-  const due = State.getDueSigns();
-  const basePool = quizMode === 'practice' && due.length ? due : learned;
-  const pool = (data.signs?.length ? data.signs : basePool).filter(l => SIGN_LETTERS.includes(l));
-  quizQueue = buildQuizQuestions(pool, QUIZ_LEN);
+  const known = l => SIGN_LETTERS.includes(l);
+  const learned = State.getLearnedSigns().filter(known);
+  const due = State.getDueSigns().filter(known);
+
+  // Practice leads with what's closest to being forgotten but fills the rest of
+  // the session from everything else learned, so a short due list still plays
+  // as a varied session. A checkpoint tests everything learned so far, so it
+  // can gate the next lesson fairly.
+  let primary, pad;
+  if (data.signs?.length) {
+    primary = data.signs.filter(known); pad = [];
+  } else if (quizMode === 'practice') {
+    primary = due; pad = learned.filter(l => !due.includes(l));
+  } else {
+    primary = learned; pad = [];
+  }
+  quizQueue = buildQuizQuestions(primary, pad, QUIZ_LEN);
   quizTotal = quizQueue.length;
   quizIndex = 0;
   quizFirstTryMisses = 0;
@@ -1088,12 +1112,17 @@ function updateQuiz(dt) {
   if (!q) { quizPhase = 'result'; return; }
   const rects = quizChoiceRects(q.type);
   rects.forEach((r, i) => btn(`c${i}`, r.x, r.y, r.w, r.h, q.choices[i], 'quiz'));
+  // There was no way out of a quiz once it started. Practice is optional and a
+  // checkpoint can always be retried, so both should be abandonable.
+  btn('quit', 4, 22, 36, 12, '< BACK', 'small');
 
   const tap = consumeTap();
   if (tap) {
     const b = hitButton(tap.x, tap.y);
+    if (b?.id === 'quit') { SFX.select(); goTo('home'); return; }
     if (b?.id?.startsWith('c')) answerQuiz(Number(b.id.slice(1)));
   }
+  if (keys['x']) { keys['x'] = false; SFX.select(); goTo('home'); return; }
   // Keyboard 1-4 for desktop
   for (let i = 0; i < 4; i++) {
     if (keys[String(i + 1)]) { keys[String(i + 1)] = false; answerQuiz(i); break; }
@@ -1137,7 +1166,10 @@ function drawQuiz() {
   // Progress
   R.textColor(`${Math.min(quizIndex + 1, quizQueue.length)}/${quizQueue.length}`, R.width - 26, 10, '#555', 5, 'right');
   R.progressBarColor(8, 12, R.width - 58, 5, quizIndex / quizQueue.length, '#1a1a1a', '#346856');
-  R.textColor(quizMode === 'practice' ? 'PRACTICE' : 'REVIEW', 8, 24, '#88c070', 6);
+  R.textColor(quizMode === 'practice' ? 'PRACTICE' : 'REVIEW', 48, 24, '#88c070', 6);
+  // Choice buttons use the 'quiz' style, which drawButtons ignores; this only
+  // renders the BACK control.
+  drawButtons();
 
   const rects = quizChoiceRects(q.type);
 
