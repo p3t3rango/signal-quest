@@ -442,17 +442,19 @@ function updateLesson(dt) {
       if (detectionBuffer.length > SMOOTH_FRAMES) detectionBuffer.shift();
       const smoothDetected = detectionBuffer.filter(Boolean).length >= 3; // 3 of 5 frames
 
+      // Dev only: count the sign without the camera, so the lesson -> complete
+      // flow can be exercised where there's no hand to detect. Stripped from
+      // production builds by the import.meta.env.DEV guard.
+      if (import.meta.env?.DEV && keys['c']) {
+        keys['c'] = false;
+        succeedSign(letter);
+        break;
+      }
+
       if (smoothDetected) {
         holdTimer += dt;
         if (holdTimer % 200 < dt) SFX.tick();
-        if (holdTimer >= HOLD_REQUIRED) {
-          // Success!
-          SFX.success();
-          R.flash('#88c070', 200);
-          State.masterSign(letter);
-          lessonPhase = 'correct';
-          lessonTimer = 0;
-        }
+        if (holdTimer >= HOLD_REQUIRED) succeedSign(letter);
       } else {
         holdTimer = Math.max(0, holdTimer - dt * 0.3); // slower decay
       }
@@ -513,6 +515,14 @@ function updateLesson(dt) {
       break;
     }
   }
+}
+
+function succeedSign(letter) {
+  SFX.success();
+  R.flash('#88c070', 200);
+  State.masterSign(letter);
+  lessonPhase = 'correct';
+  lessonTimer = 0;
 }
 
 function advanceSign() {
@@ -1230,4 +1240,16 @@ function stepFrame(time) {
 State.loadState();
 initHome();
 initWebcam();
+
+// Dev-only inspection hook. Scene state lives in module scope, which makes the
+// lesson flow impossible to observe from the console while debugging it.
+// Stripped from production builds.
+if (import.meta.env?.DEV) {
+  window.__sqDev = {
+    peek: () => ({ scene, transitionPhase, lessonPhase, lessonSignIndex, lessonTimer, holdTimer,
+                   signs: lessonData?.signs, quizPhase, quizIndex }),
+    step: (n = 1, dtMs = 100) => { for (let i = 0; i < n; i++) stepFrame((lastTime || 0) + dtMs); },
+  };
+}
+
 requestAnimationFrame(gameLoop);
