@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>Signal Quest — Landmark Capture</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: #081820; color: #e0f8d0;
+      font-family: "Press Start 2P", monospace; font-size: 10px; line-height: 1.7;
+      padding: 10px; -webkit-text-size-adjust: 100%;
+    }
+    h1 { font-size: 12px; color: #88c070; margin-bottom: 4px; }
+    .sub { color: #555; font-size: 8px; margin-bottom: 10px; }
+    #stage { position: relative; width: 100%; max-width: 420px; margin: 0 auto; }
+    #video { display: none; }
+    #overlay { width: 100%; border: 2px solid #346856; background: #000; display: block; }
+    #verdict { text-align: center; padding: 8px 4px; font-size: 11px; }
+    .ok { color: #88c070; } .no { color: #e05050; } .wait { color: #ebcb8b; }
+    #letters { display: grid; grid-template-columns: repeat(7, 1fr); gap: 5px; margin: 10px auto; max-width: 420px; }
+    #letters button {
+      font-family: inherit; font-size: 12px; padding: 10px 0;
+      background: #1a3a2a; color: #e0f8d0; border: 1px solid #346856; cursor: pointer;
+    }
+    #letters button.sel { background: #88c070; color: #081820; border-color: #e0f8d0; }
+    #letters button .n { display: block; font-size: 7px; color: #ebcb8b; margin-top: 3px; }
+    #letters button.sel .n { color: #081820; }
+    .row { display: flex; gap: 6px; max-width: 420px; margin: 0 auto 8px; }
+    .row button {
+      flex: 1; font-family: inherit; font-size: 10px; padding: 14px 4px;
+      background: #346856; color: #e0f8d0; border: none; cursor: pointer;
+    }
+    .row button.alt { background: #222; color: #88c070; }
+    .row button:disabled { opacity: 0.4; }
+    #log { max-width: 420px; margin: 0 auto; font-size: 8px; color: #88c070; min-height: 2.5em; }
+    .hint { max-width: 420px; margin: 8px auto; font-size: 8px; color: #555; line-height: 1.9; }
+  </style>
+</head>
+<body>
+  <h1>LANDMARK CAPTURE</h1>
+  <div class="sub">dev tool — records hand landmarks as test fixtures</div>
+
+  <div id="stage">
+    <video id="video" playsinline autoplay muted></video>
+    <canvas id="overlay" width="480" height="360"></canvas>
+  </div>
+  <div id="verdict" class="wait">starting camera…</div>
+
+  <div id="letters"></div>
+
+  <div class="row">
+    <button id="capture" disabled>CAPTURE (SPACE)</button>
+  </div>
+  <div class="row">
+    <button id="download" class="alt" disabled>DOWNLOAD JSON</button>
+    <button id="undo" class="alt" disabled>UNDO LAST</button>
+    <button id="clear" class="alt" disabled>CLEAR ALL</button>
+  </div>
+  <div id="log"></div>
+
+  <div class="hint">
+    1. pick a letter · 2. hold the sign · 3. capture<br>
+    take 3-5 per letter, varying hand angle and distance.<br>
+    the verdict line shows what the CURRENT detector thinks, so you can
+    capture the cases it gets wrong on purpose.<br>
+    then save the download into test/fixtures/ and run: npm run test:signs
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/hands.js" integrity="sha384-tIvzrF8oDWxZ8U5FS0FPuOWXLiqc+rM6HxWvoUuduvMS+TGzSli7gP/jCXhNj+kE" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3.1640029074/camera_utils.js" integrity="sha384-q1KhAZhJcJXr3zfC3Tz07pBqQSabwFIZhXlmlUAB8s0zk4ETWERkIKGBCFQ5Jc3e" crossorigin="anonymous"></script>
+  <script type="module" src="/src/capture.js"></script>
+</body>
+</html>

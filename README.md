@@ -29,6 +29,31 @@ vercel --prod
 Check the connection with `vercel project inspect signal-quest`, or reconnect
 with `vercel git connect`.
 
+## Testing the detectors
+
+The sign detectors were originally written by reasoning about hand geometry and
+never checked against real hands — which is how `B` shipped rejecting a correct
+sign. There's now a capture tool and a regression suite:
+
+```bash
+npm run capture      # opens /capture.html — hold a sign, hit capture
+                     # download the JSON into test/fixtures/
+npm run test:signs   # runs every fixture through its letter's detector
+```
+
+The capture page shows live what the current detector thinks of your hand, so
+you can deliberately record the poses it gets wrong. Take 3–5 samples per
+letter, varying angle and distance — the failures are almost always about wrist
+rotation, not hand shape.
+
+The suite reports two things. **MISS** is a real hand signing X that the X
+detector rejects; that's a bug and exits non-zero. **AMBIG** is a hand that also
+satisfies another letter's detector; harmless on its own, since the game only
+ever tests the target letter, but it shows where detectors overlap.
+
+`test/fixtures/` is empty until someone captures. An empty run exits 0 and says
+so rather than pretending to pass.
+
 ## Architecture
 
 Logical resolution is a fixed 160x288 portrait canvas, scaled to fit the screen.
@@ -91,8 +116,9 @@ wrist rotates. `isThumbExtended` still uses a thumb-tip-to-thumb-MCP distance
 test, which is a poor discriminator — that distance is close to the thumb's own
 length whichever way it points. It's left in place because A, C, K, L and Y
 depend on it and K holds the thumb *over* the palm, so the better projection
-metric (`thumbPalmPosition`) would break it. Fixing this properly needs captured
-landmark fixtures from real hands to regression-test against.
+metric (`thumbPalmPosition`) would break it. Fixing it properly means capturing
+fixtures for at least A, C, K, L and Y (see **Testing the detectors** above),
+switching the metric, and confirming the suite still passes.
 
 ## Assets
 

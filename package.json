@@ -5,7 +5,9 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test:signs": "node test/run-detector-tests.mjs",
+    "capture": "vite --open /capture.html"
   },
   "keywords": [],
   "author": "",
@@ -13,5 +15,6 @@
   "description": "",
   "dependencies": {
     "vite": "^8.0.1"
-  }
+  },
+  "type": "module"
 }
