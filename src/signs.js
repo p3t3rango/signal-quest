@@ -42,24 +42,54 @@ function isFingerCurled(landmarks, finger) {
   return tip.y > pip.y - hs * 0.08;
 }
 
+// Where the thumb tip sits along the palm's lateral axis: 0 at the index
+// knuckle, 1 at the pinky knuckle.
+//
+// The previous test measured thumb tip to thumb MCP distance, which is close to
+// the thumb's own length whichever way it points — folding a thumb across the
+// palm rotates it, it doesn't shorten it. That made "tucked" depend mostly on
+// camera foreshortening, so a slightly angled hand read as thumb-out and a
+// correct B was rejected.
+//
+// This projection asks the question that actually matters: is the thumb lying
+// across the palm, or held out to the side of it? Scale-, rotation- and
+// handedness-invariant, because the axis comes from the landmarks themselves.
+function thumbPalmPosition(landmarks) {
+  const idx = landmarks[5];    // index MCP
+  const pinky = landmarks[17]; // pinky MCP
+  const tip = landmarks[4];
+  const ax = pinky.x - idx.x, ay = pinky.y - idx.y;
+  const len2 = ax * ax + ay * ay;
+  if (len2 < 1e-9) return 0;
+  return ((tip.x - idx.x) * ax + (tip.y - idx.y) * ay) / len2;
+}
+
+// Deliberately NOT switched to thumbPalmPosition. A, C, K, L and Y gate on this,
+// and K holds the thumb between the index and middle fingers — over the palm —
+// so a projection-based test would read K as tucked and break it. A and C are
+// near the boundary too. Without real landmark captures to check against, the
+// distance test stays; it is at least permissive, and false positives here are
+// much cheaper than rejecting correct signs.
 function isThumbExtended(landmarks) {
   const tip = landmarks[4];
-  const ip = landmarks[3];
   const mcp = landmarks[2];
   const hs = handScale(landmarks);
-  // Thumb tip is far from MCP horizontally OR vertically (supports different orientations)
   const dx = Math.abs(tip.x - mcp.x);
   const dy = Math.abs(tip.y - mcp.y);
   return Math.max(dx, dy) > hs * 0.3;
 }
 
+// Folded in over the palm rather than held out to the side. Only U gates on this
+// now, so the projection metric is safe to use here.
 function isThumbTucked(landmarks) {
-  const tip = landmarks[4];
-  const mcp = landmarks[2];
-  const hs = handScale(landmarks);
-  const dx = Math.abs(tip.x - mcp.x);
-  const dy = Math.abs(tip.y - mcp.y);
-  return Math.max(dx, dy) < hs * 0.4;
+  return thumbPalmPosition(landmarks) >= 0.08;
+}
+
+// Index and pinky fingertips close enough that the hand reads as a flat blade
+// rather than a splayed "5". Tip-to-tip distance, so a rotated hand still passes.
+function fingersTogether(landmarks) {
+  const spread = Math.hypot(landmarks[8].x - landmarks[20].x, landmarks[8].y - landmarks[20].y);
+  return spread < handScale(landmarks) * 1.2;
 }
 
 function allFingersCurled(landmarks) {
@@ -106,8 +136,10 @@ const SIGN_DETECTORS = {
     return curledCount(lm) >= 3 && isThumbExtended(lm);
   },
   B: (lm) => {
-    // All fingers up, thumb tucked
-    return allFingersExtended(lm) && isThumbTucked(lm);
+    // Flat hand, four fingers up and held together. Four extended fingers is
+    // already unique to B across this letter set (W curls the pinky), so the
+    // thumb adds no discrimination here — gating on it only rejected good Bs.
+    return allFingersExtended(lm) && fingersTogether(lm);
   },
   C: (lm) => {
     // Curved hand — fingers together, slightly curved, thumb out
@@ -252,7 +284,10 @@ export function getHandDebugInfo(landmarks) {
 // Returns array of hint objects telling user what to fix
 const SIGN_EXPECTATIONS = {
   A: { index: 'curled', middle: 'curled', ring: 'curled', pinky: 'curled', thumb: 'extended' },
-  B: { index: 'extended', middle: 'extended', ring: 'extended', pinky: 'extended', thumb: 'tucked' },
+  // thumb 'any': the detector no longer gates on it, and a hint demanding a
+  // tuck while the sign is already accepted just reads as broken. The written
+  // description still teaches the thumb position.
+  B: { index: 'extended', middle: 'extended', ring: 'extended', pinky: 'extended', thumb: 'any', together: true },
   C: { index: 'extended', middle: 'extended', ring: 'any', pinky: 'any', thumb: 'extended' },
   D: { index: 'extended', middle: 'curled', ring: 'curled', pinky: 'curled', thumb: 'any' },
   F: { index: 'curled', middle: 'extended', ring: 'extended', pinky: 'extended', thumb: 'any' },
@@ -286,6 +321,11 @@ export function getSignFeedback(landmarks, targetLetter) {
     hints.push('EXTEND THUMB');
   } else if (expect.thumb === 'tucked' && !isThumbTucked(landmarks)) {
     hints.push('TUCK THUMB IN');
+  }
+  // Without this, a splayed B fails detection while every finger reads
+  // "extended" — so the coaching panel would sit empty with nothing to fix.
+  if (expect.together && !fingersTogether(landmarks)) {
+    hints.push('FINGERS TOGETHER');
   }
   return hints;
 }
