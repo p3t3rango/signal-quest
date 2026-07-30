@@ -161,6 +161,27 @@ let bgmFilter = null;
 let hissSource = null;
 let hissGain = null;
 
+// ─── Mute ───
+// Music only — sound effects stay audible so buttons still feel responsive.
+// Kept in its own storage key rather than the save file: it's a device
+// preference, not game progress, and shouldn't travel with a save.
+const MUTE_KEY = 'signalquest_muted';
+let muted = false;
+try { muted = localStorage.getItem(MUTE_KEY) === '1'; } catch (e) { /* private mode */ }
+
+export function isMuted() { return muted; }
+
+export function toggleMute() {
+  muted = !muted;
+  try { localStorage.setItem(MUTE_KEY, muted ? '1' : '0'); } catch (e) { /* ignore */ }
+  if (bgmChain) {
+    const ctx = getCtx();
+    // Ramp rather than jump, so it doesn't click
+    bgmChain.gain.setTargetAtTime(muted ? 0 : 1, ctx.currentTime, 0.04);
+  }
+  return muted;
+}
+
 function getBgmChain() {
   const ctx = getCtx();
   if (!bgmChain) {
@@ -169,7 +190,7 @@ function getBgmChain() {
     bgmFilter.frequency.value = 1250;
     bgmFilter.Q.value = 0.6;
     bgmChain = ctx.createGain();
-    bgmChain.gain.value = 1;
+    bgmChain.gain.value = muted ? 0 : 1;
     bgmChain.connect(bgmFilter);
     bgmFilter.connect(ctx.destination);
   }

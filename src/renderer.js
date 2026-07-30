@@ -167,6 +167,31 @@ export class Renderer {
   get flameWidth() { return 7; }
   get flameHeight() { return 10; }
 
+  // Speaker icon for the music toggle — waves when on, a cross when muted.
+  // Same integer-cell rule as flame(): fractional px turns it to mush.
+  speakerIcon(x, y, px, muted, color) {
+    const s = Math.max(1, Math.round(px));
+    const ox = Math.round(x), oy = Math.round(y);
+    const BODY = ['..2', '.22', '222', '222', '222', '.22', '..2'];
+    for (let r = 0; r < BODY.length; r++) {
+      for (let c = 0; c < BODY[r].length; c++) {
+        if (BODY[r][c] === '2') this.rectColor(ox + c * s, oy + r * s, s, s, color);
+      }
+    }
+    const gx = ox + 4 * s;
+    if (muted) {
+      for (let i = 0; i < 3; i++) {
+        this.rectColor(gx + i * s, oy + (2 + i) * s, s, s, color);
+        this.rectColor(gx + (2 - i) * s, oy + (2 + i) * s, s, s, color);
+      }
+    } else {
+      this.rectColor(gx, oy + 2 * s, s, s, color);
+      this.rectColor(gx, oy + 4 * s, s, s, color);
+      this.rectColor(gx + s, oy + s, s, s, color);
+      this.rectColor(gx + s, oy + 5 * s, s, s, color);
+    }
+  }
+
   // Draw an image in logical coords
   drawImage(img, x, y, w, h) {
     if (!img || !img.complete) return;

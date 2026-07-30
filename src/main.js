@@ -1,6 +1,6 @@
 // Signal Quest: Color Edition — Mobile-first Duolingo-style ASL trainer
 import { Renderer } from './renderer.js';
-import { SFX, playBGM } from './audio.js';
+import { SFX, playBGM, toggleMute, isMuted } from './audio.js';
 import { detectSign, SIGN_DESCRIPTIONS, getHandDebugInfo, getSignFeedback } from './signs.js';
 import { getOrientation, getHandSide } from './handdraw.js';
 import * as State from './gamestate.js';
@@ -166,24 +166,32 @@ function initHome() {
 function updateHome(dt) {
   sceneTimer += dt;
   clearButtons();
+  // A cleared lesson whose checkpoint is still outstanding blocks the next
+  // lesson, so CONTINUE has to lead there rather than into a locked door.
+  const pendingCheckpoint = State.getPendingCheckpointId();
   const nextId = State.getNextLessonId();
-  if (nextId) {
-    btn('continue', 30, 170, 100, 22, 'CONTINUE', 'primary');
+  if (pendingCheckpoint || nextId) {
+    btn('continue', 30, 170, 100, 22, pendingCheckpoint ? 'REVIEW' : 'CONTINUE', 'primary');
   }
   btn('lessons', 30, 200, 100, 18, 'LESSONS', 'secondary');
   btn('profile', 30, 226, 100, 18, 'PROFILE', 'secondary');
 
+  const go = () => {
+    SFX.select();
+    if (pendingCheckpoint) goTo('quiz', { lessonId: pendingCheckpoint });
+    else goTo('lesson', { lessonId: nextId });
+  };
+
   const tap = consumeTap();
   if (tap) {
     const b = hitButton(tap.x, tap.y);
-    if (b?.id === 'continue' && nextId) { SFX.select(); goTo('lesson', { lessonId: nextId }); }
+    if (b?.id === 'continue' && (pendingCheckpoint || nextId)) go();
     else if (b?.id === 'lessons') { SFX.select(); goTo('map'); }
     else if (b?.id === 'profile') { SFX.select(); goTo('profile'); }
   }
   // Keyboard shortcuts
   if (keys['Enter'] || keys['z']) { keys['Enter'] = false; keys['z'] = false;
-    const nextId2 = State.getNextLessonId();
-    if (nextId2) { SFX.select(); goTo('lesson', { lessonId: nextId2 }); }
+    if (pendingCheckpoint || nextId) go();
   }
 }
 
@@ -709,14 +717,22 @@ function updateComplete(dt) {
     btn('cont', 30, 240, 100, 22, 'CONTINUE', 'primary');
   }
 
+  // Straight from the lesson into its review checkpoint — that's the gate on
+  // the next lesson, so don't make the player go hunting for it.
+  const afterComplete = () => {
+    SFX.select();
+    if (State.isCheckpointPassed(completeLessonId)) goTo('home');
+    else goTo('quiz', { lessonId: completeLessonId });
+  };
+
   const tap = consumeTap();
   if (tap && sceneTimer > 2500) {
     const b = hitButton(tap.x, tap.y);
-    if (b?.id === 'cont') { SFX.select(); goTo('home'); }
+    if (b?.id === 'cont') afterComplete();
   }
   if ((keys['z'] || keys['Enter']) && sceneTimer > 2500) {
     keys['z'] = false; keys['Enter'] = false;
-    SFX.select(); goTo('home');
+    afterComplete();
   }
 }
 
@@ -839,10 +855,271 @@ function drawProfile() {
   });
 }
 
+// ─── Scene: Quiz (receptive practice) ──────────────────
+// The lesson scene trains expressive skill — make the shape, camera confirms.
+// This trains the receptive side: read a shape and name it. In fingerspelling
+// that's the harder direction, and it doesn't come free with expressive practice.
+
+// Shapes that actually get confused with each other. Better distractors than
+// random letters, because they force the discriminating detail to be noticed.
+const CONFUSABLE = {
+  A: ['O', 'C', 'I'], B: ['W', 'U', 'C'], C: ['O', 'A', 'B'], D: ['F', 'L', 'I'],
+  F: ['D', 'B', 'O'], I: ['Y', 'A', 'D'], K: ['V', 'U', 'R'], L: ['D', 'Y', 'I'],
+  O: ['C', 'A', 'F'], R: ['U', 'V', 'K'], U: ['V', 'R', 'K'], V: ['U', 'R', 'W'],
+  W: ['V', 'B', 'U'], Y: ['I', 'L', 'A'],
+};
+
+const QUIZ_LEN = 8;
+const QUIZ_MAX_MISSES = 1;   // misses allowed before a checkpoint fails
+const FEEDBACK_MS = 900;
+
+let quizQueue = [];
+let quizIndex = 0;
+let quizFirstTryMisses = 0;
+let quizPhase = 'ask';       // 'ask' | 'feedback' | 'result'
+let quizFeedbackTimer = 0;
+let quizLastCorrect = false;
+let quizPickedIdx = -1;
+let quizLessonId = 0;
+let quizTotal = QUIZ_LEN;
+
+function shuffle(list) {
+  const arr = [...list];
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
+
+function pickDistractors(answer, count) {
+  const near = (CONFUSABLE[answer] || []).filter(l => SIGN_LETTERS.includes(l) && l !== answer);
+  const rest = shuffle(SIGN_LETTERS.filter(l => l !== answer && !near.includes(l)));
+  // Distractors come from all 14 shapes, not just signs learned so far —
+  // after lesson 1 there'd only be two other candidates otherwise.
+  return [...shuffle(near), ...rest].slice(0, count);
+}
+
+function makeQuestion(answer, type) {
+  return { type, answer, choices: shuffle([answer, ...pickDistractors(answer, 3)]) };
+}
+
+function buildQuizQuestions(pool, n) {
+  if (!pool.length) return [];
+  const order = shuffle(pool);
+  const qs = [];
+  for (let i = 0; i < n; i++) {
+    // Alternate direction so both reading and naming get practised
+    qs.push(makeQuestion(order[i % order.length], i % 2 === 0 ? 'img2letter' : 'letter2img'));
+  }
+  return shuffle(qs);
+}
+
+function initQuiz(data) {
+  quizLessonId = data.lessonId;
+  const learned = State.getLearnedSigns();
+  const pool = (data.signs?.length ? data.signs : learned).filter(l => SIGN_LETTERS.includes(l));
+  quizQueue = buildQuizQuestions(pool, QUIZ_LEN);
+  quizTotal = quizQueue.length;
+  quizIndex = 0;
+  quizFirstTryMisses = 0;
+  quizFeedbackTimer = 0;
+  quizPickedIdx = -1;
+  quizPhase = 'ask';
+  if (!quizQueue.length) enterQuizResult();
+  playBGM('lofiFocus');
+}
+
+function quizPassed() { return quizFirstTryMisses <= QUIZ_MAX_MISSES; }
+
+// Single entry point into the result phase, so the checkpoint is always
+// recorded — whichever way the quiz ended.
+function enterQuizResult() {
+  quizPhase = 'result';
+  sceneTimer = 0;
+  if (quizPassed()) {
+    State.passCheckpoint(quizLessonId);
+    State.addXP(10);
+    SFX.badge();
+  }
+}
+
+// Choice hit-boxes. Letters are a 2x2 button grid; images a 2x2 tile grid.
+function quizChoiceRects(type) {
+  return type === 'img2letter'
+    ? [{ x: 14, y: 172, w: 60, h: 26 }, { x: 86, y: 172, w: 60, h: 26 },
+       { x: 14, y: 206, w: 60, h: 26 }, { x: 86, y: 206, w: 60, h: 26 }]
+    : [{ x: 18, y: 108, w: 52, h: 52 }, { x: 90, y: 108, w: 52, h: 52 },
+       { x: 18, y: 172, w: 52, h: 52 }, { x: 90, y: 172, w: 52, h: 52 }];
+}
+
+// Feedback sits in the gap between the prompt and the choices, which is at a
+// different height for each question type.
+const QUIZ_FEEDBACK_Y = { img2letter: 150, letter2img: 90 };
+
+function answerQuiz(idx) {
+  const q = quizQueue[quizIndex];
+  const correct = q.choices[idx] === q.answer;
+  quizPickedIdx = idx;
+  quizLastCorrect = correct;
+  State.recordQuizAnswer(q.answer, correct);
+
+  if (correct) {
+    SFX.success();
+  } else {
+    SFX.wrong();
+    // Requeued items are the second look at something already missed — don't
+    // let one mistake count twice against the checkpoint.
+    if (!q.requeued) quizFirstTryMisses++;
+    // Re-ask a missed sign a few questions later, still in this session
+    const insertAt = Math.min(quizQueue.length, quizIndex + 3);
+    quizQueue.splice(insertAt, 0, { ...q, choices: shuffle(q.choices), requeued: true });
+  }
+  quizPhase = 'feedback';
+  quizFeedbackTimer = 0;
+}
+
+function updateQuiz(dt) {
+  sceneTimer += dt;
+  clearButtons();
+
+  if (quizPhase === 'feedback') {
+    quizFeedbackTimer += dt;
+    if (quizFeedbackTimer >= FEEDBACK_MS) {
+      quizIndex++;
+      quizPickedIdx = -1;
+      if (quizIndex >= quizQueue.length) enterQuizResult();
+      else { quizPhase = 'ask'; sceneTimer = 0; }
+    }
+    return;
+  }
+
+  if (quizPhase === 'result') {
+    const passed = quizPassed();
+    btn('done', 30, 230, 100, 22, passed ? 'CONTINUE' : 'TRY AGAIN', 'primary');
+    const tap = consumeTap();
+    const key = keys['z'] || keys['Enter'];
+    if ((tap && hitButton(tap.x, tap.y)?.id === 'done') || key) {
+      keys['z'] = false; keys['Enter'] = false;
+      SFX.select();
+      if (passed) goTo('home');
+      else goTo('quiz', { lessonId: quizLessonId });
+    }
+    return;
+  }
+
+  // 'ask'
+  const q = quizQueue[quizIndex];
+  if (!q) { quizPhase = 'result'; return; }
+  const rects = quizChoiceRects(q.type);
+  rects.forEach((r, i) => btn(`c${i}`, r.x, r.y, r.w, r.h, q.choices[i], 'quiz'));
+
+  const tap = consumeTap();
+  if (tap) {
+    const b = hitButton(tap.x, tap.y);
+    if (b?.id?.startsWith('c')) answerQuiz(Number(b.id.slice(1)));
+  }
+  // Keyboard 1-4 for desktop
+  for (let i = 0; i < 4; i++) {
+    if (keys[String(i + 1)]) { keys[String(i + 1)] = false; answerQuiz(i); break; }
+  }
+}
+
+function drawQuiz() {
+  R.clear(0);
+
+  if (quizPhase === 'result') {
+    const passed = quizPassed();
+    R.textColor(passed ? 'CHECKPOINT' : 'NOT QUITE', R.width / 2, 60, passed ? '#88c070' : '#e05050', 10, 'center');
+    R.textColor(passed ? 'CLEARED!' : 'KEEP GOING', R.width / 2, 78, passed ? '#e0f8d0' : '#ebcb8b', 10, 'center');
+    R.textColor(`${quizTotal - quizFirstTryMisses}/${quizTotal} FIRST TRY`, R.width / 2, 120, '#88c070', 6, 'center');
+    if (passed) {
+      R.textColor('+10 XP', R.width / 2, 140, '#e8c170', 8, 'center');
+      R.textColor('NEXT LESSON', R.width / 2, 168, '#88c070', 5, 'center');
+      R.textColor('UNLOCKED', R.width / 2, 178, '#88c070', 5, 'center');
+    } else {
+      R.textColor(`MISS ${QUIZ_MAX_MISSES} OR FEWER`, R.width / 2, 150, '#555', 5, 'center');
+      R.textColor('TO UNLOCK', R.width / 2, 160, '#555', 5, 'center');
+    }
+    drawButtons();
+    return;
+  }
+
+  const q = quizQueue[quizIndex];
+  if (!q) return;
+
+  // Progress
+  R.textColor(`${Math.min(quizIndex + 1, quizQueue.length)}/${quizQueue.length}`, R.width - 8, 10, '#555', 5, 'right');
+  R.progressBarColor(8, 12, R.width - 40, 5, quizIndex / quizQueue.length, '#1a1a1a', '#346856');
+  R.textColor('REVIEW', 8, 24, '#88c070', 6);
+
+  const rects = quizChoiceRects(q.type);
+
+  if (q.type === 'img2letter') {
+    R.textColor('WHICH LETTER?', R.width / 2, 40, '#e0f8d0', 8, 'center');
+    const img = signImages[q.answer];
+    const size = 84;
+    const ix = (R.width - size) / 2, iy = 58;
+    R.rectColor(ix - 3, iy - 3, size + 6, size + 6, '#e0f8d0');
+    // Mirrored to match the selfie view the learner practises against
+    if (img?.complete) R.drawImageFlipped(img, ix, iy, size, size);
+    rects.forEach((r, i) => {
+      const state = quizChoiceState(q, i);
+      R.rectColor(r.x, r.y, r.w, r.h, state.bg);
+      R.strokeRect(r.x, r.y, r.w, r.h, 1);
+      R.textColor(q.choices[i], r.x + r.w / 2, r.y + 8, state.fg, 10, 'center');
+    });
+  } else {
+    R.textColor('PICK THE SIGN', R.width / 2, 40, '#e0f8d0', 8, 'center');
+    R.textColor(q.answer, R.width / 2, 58, '#e8c170', 24, 'center');
+    rects.forEach((r, i) => {
+      const state = quizChoiceState(q, i);
+      R.rectColor(r.x - 2, r.y - 2, r.w + 4, r.h + 4, state.bg);
+      R.rectColor(r.x, r.y, r.w, r.h, '#e0f8d0');
+      const img = signImages[q.choices[i]];
+      if (img?.complete) R.drawImageFlipped(img, r.x + 2, r.y + 2, r.w - 4, r.h - 4);
+    });
+  }
+
+  if (quizPhase === 'feedback') {
+    R.textColor(quizLastCorrect ? 'CORRECT!' : `IT WAS '${q.answer}'`,
+      R.width / 2, QUIZ_FEEDBACK_Y[q.type], quizLastCorrect ? '#88c070' : '#e05050', 7, 'center');
+  }
+}
+
+// Colours for a choice: neutral while asking, right/wrong once answered.
+function quizChoiceState(q, i) {
+  if (quizPhase !== 'feedback') return { bg: '#1a3a2a', fg: '#e0f8d0' };
+  if (q.choices[i] === q.answer) return { bg: '#346856', fg: '#e0f8d0' };
+  if (i === quizPickedIdx) return { bg: '#5a1a1a', fg: '#e05050' };
+  return { bg: '#1a1a1a', fg: '#555' };
+}
+
 // ─── Scene Registry ────────────────────────────────────
-const sceneInits = { home: initHome, map: initMap, lesson: initLesson, complete: initComplete, profile: initProfile };
-const sceneUpdates = { home: updateHome, map: updateMap, lesson: updateLesson, complete: updateComplete, profile: updateProfile };
-const sceneDraws = { home: drawHome, map: drawMap, lesson: drawLesson, complete: drawComplete, profile: drawProfile };
+const sceneInits = { home: initHome, map: initMap, lesson: initLesson, complete: initComplete, profile: initProfile, quiz: initQuiz };
+const sceneUpdates = { home: updateHome, map: updateMap, lesson: updateLesson, complete: updateComplete, profile: updateProfile, quiz: updateQuiz };
+const sceneDraws = { home: drawHome, map: drawMap, lesson: drawLesson, complete: drawComplete, profile: drawProfile, quiz: drawQuiz };
+
+// ─── Music toggle (global, all scenes) ─────────────────
+// Hit area is deliberately larger than the 7x7 icon — it has to be thumb-sized
+// on a phone. Bottom-right is the one corner no scene draws into.
+const MUTE_ICON = { x: 145, y: 272 };
+const MUTE_HIT = { x: 138, y: 266, w: 22, h: 22 };
+
+// Returns true if it swallowed the tap, so the scene beneath doesn't also act.
+function consumeMuteTap() {
+  if (!tapped) return false;
+  const h = MUTE_HIT;
+  if (tapX < h.x || tapX > h.x + h.w || tapY < h.y || tapY > h.y + h.h) return false;
+  tapped = false;
+  toggleMute();
+  SFX.select();   // an effect, not music — still audible while muted
+  return true;
+}
+
+function drawMuteToggle() {
+  R.speakerIcon(MUTE_ICON.x, MUTE_ICON.y, 1, isMuted(), isMuted() ? '#e05050' : '#88c070');
+}
 
 // ─── Game Loop ─────────────────────────────────────────
 let lastTime = 0;
@@ -864,10 +1141,13 @@ function gameLoop(time) {
     }
   }
 
-  // Update scene
+  // Update scene. The music toggle gets first look at the tap so it works from
+  // every scene without each one having to know about it.
   if (transitionPhase === 'none' || transitionPhase === 'opening') {
-    const update = sceneUpdates[scene];
-    if (update) update(dt);
+    if (!consumeMuteTap()) {
+      const update = sceneUpdates[scene];
+      if (update) update(dt);
+    }
   }
 
   // Draw
@@ -876,6 +1156,8 @@ function gameLoop(time) {
 
   const draw = sceneDraws[scene];
   if (draw) draw();
+
+  drawMuteToggle();
 
   R.drawFlash();
 

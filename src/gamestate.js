@@ -1,6 +1,7 @@
 // Duolingo-style game state — streaks, XP, lesson progress, spaced repetition
 
 const SAVE_KEY = 'signalquest_save';
+const SCHEMA_VERSION = 1;
 
 // Lesson curriculum
 export const LESSONS = [
@@ -22,6 +23,9 @@ function createDefault() {
     xp: 0,
     badges: [],             // lesson ids that earned badges
     bestStars: {},          // { lessonId: 1-3 } best star rating per lesson
+    checkpointsPassed: [],  // lesson ids whose review checkpoint was cleared
+    quizStats: {},          // { letter: { seen, correct } } receptive accuracy
+    schemaVersion: SCHEMA_VERSION,
   };
 }
 
@@ -39,10 +43,25 @@ export function saveState() {
 }
 
 export function loadState() {
+  let raw = null;
   try {
     const saved = localStorage.getItem(SAVE_KEY);
-    if (saved) state = { ...createDefault(), ...JSON.parse(saved) };
-  } catch (e) { state = createDefault(); }
+    if (saved) raw = JSON.parse(saved);
+  } catch (e) { raw = null; }
+
+  if (!raw) { state = createDefault(); return; }
+  state = { ...createDefault(), ...raw };
+
+  // Saves written before checkpoints existed have completedLessons but no
+  // checkpointsPassed; gating on the new key alone would drop those players
+  // back to lesson 1. Grandfather them ONCE, keyed off the absent schema
+  // version — re-running this every load would let a reload skip any
+  // checkpoint the player hasn't cleared yet.
+  if (raw.schemaVersion === undefined) {
+    state.checkpointsPassed = [...state.completedLessons];
+    state.schemaVersion = SCHEMA_VERSION;
+    saveState();
+  }
 }
 
 // ─── Hearts ───
@@ -86,7 +105,52 @@ export function isLessonComplete(lessonId) {
 
 export function isLessonUnlocked(lessonId) {
   if (lessonId === 1) return true;
-  return state.completedLessons.includes(lessonId - 1);
+  // Finishing the previous lesson isn't enough — its review checkpoint has to
+  // be cleared too, so signs are retained rather than just seen once.
+  return state.completedLessons.includes(lessonId - 1)
+      && state.checkpointsPassed.includes(lessonId - 1);
+}
+
+// ─── Checkpoints & receptive practice ───
+export function isCheckpointPassed(lessonId) {
+  return state.checkpointsPassed.includes(lessonId);
+}
+
+export function passCheckpoint(lessonId) {
+  if (!state.checkpointsPassed.includes(lessonId)) {
+    state.checkpointsPassed.push(lessonId);
+  }
+  saveState();
+}
+
+export function recordQuizAnswer(letter, correct) {
+  const s = state.quizStats[letter] || { seen: 0, correct: 0 };
+  s.seen++;
+  if (correct) s.correct++;
+  state.quizStats[letter] = s;
+  saveState();
+}
+
+// A lesson that's been completed but whose checkpoint hasn't been cleared yet.
+// Home routes here instead of into the next (still locked) lesson.
+export function getPendingCheckpointId() {
+  for (const lesson of LESSONS) {
+    if (state.completedLessons.includes(lesson.id) && !state.checkpointsPassed.includes(lesson.id)) {
+      return lesson.id;
+    }
+  }
+  return null;
+}
+
+// Every sign taught by a lesson the player has completed.
+export function getLearnedSigns() {
+  const out = [];
+  for (const lesson of LESSONS) {
+    if (state.completedLessons.includes(lesson.id)) {
+      for (const s of lesson.signs) if (!out.includes(s)) out.push(s);
+    }
+  }
+  return out;
 }
 
 export function completeLesson(lessonId, stars) {
