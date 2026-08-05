@@ -4,7 +4,7 @@ import { SFX, playBGM, playStinger, toggleMute, isMuted } from './audio.js';
 import { detectSign, SIGN_DESCRIPTIONS, getHandDebugInfo, getSignFeedback } from './signs.js';
 import { getOrientation, getHandSide, drawHandSign } from './handdraw.js';
 import * as State from './gamestate.js';
-import { SpellTracker } from './motion.js';
+import { SpellTracker, MOTION_LETTERS } from './motion.js';
 import { pickWord, wordsFor } from './words.js';
 
 // ─── Setup ─────────────────────────────────────────────
@@ -15,7 +15,7 @@ const processCanvas = document.getElementById('webcam-process');
 
 // ─── Preload ASL reference SVGs ────────────────────────
 const signImages = {};
-const SIGN_LETTERS = ['A','B','C','D','F','I','K','L','O','R','U','V','W','Y'];
+const SIGN_LETTERS = ['A','B','C','D','F','I','J','K','L','O','R','U','V','W','Y','Z'];
 SIGN_LETTERS.forEach(letter => {
   const img = new Image();
   img.src = `/signs/${letter}.svg`;
@@ -414,6 +414,12 @@ let heartsAtStart = 3;
 const HOLD_REQUIRED = 1200;  // ms to hold sign (reduced for better feel)
 const ATTEMPT_TIMEOUT = 20000; // ms to complete sign (more time to learn)
 let detectionBuffer = [];
+const lessonTracker = new SpellTracker();
+let lessonMotionState = 'idle';
+
+// "which letter is this hand forming", unfiltered — the motion matcher needs it
+// to identify the base handshape a gesture was drawn with.
+const rawLetterAt = lm => getHandDebugInfo(lm)?.matches?.[0] || null;
 const SMOOTH_FRAMES = 5;
 
 function initLesson(data) {
@@ -459,11 +465,11 @@ function updateLesson(dt) {
       const tap = consumeTap();
       if (tap && lessonTimer > 1200) {
         const b = hitButton(tap.x, tap.y);
-        if (b?.id === 'ready') { SFX.select(); lessonPhase = 'attempt'; lessonTimer = 0; holdTimer = 0; detectionBuffer = []; }
+        if (b?.id === 'ready') { SFX.select(); lessonPhase = 'attempt'; lessonTimer = 0; holdTimer = 0; detectionBuffer = []; lessonTracker.reset(); }
       }
       if ((keys['z'] || keys['Enter']) && lessonTimer > 1200) {
         keys['z'] = false; keys['Enter'] = false;
-        SFX.select(); lessonPhase = 'attempt'; lessonTimer = 0; holdTimer = 0; detectionBuffer = [];
+        SFX.select(); lessonPhase = 'attempt'; lessonTimer = 0; holdTimer = 0; detectionBuffer = []; lessonTracker.reset();
       }
       break;
     }
@@ -485,7 +491,16 @@ function updateLesson(dt) {
         break;
       }
 
-      if (smoothDetected) {
+      if (MOTION_LETTERS[letter]) {
+        // J and Z are drawn, not held, so a hold timer can never satisfy them.
+        // Feed the tracker instead and wait for the gesture to be traced.
+        const res = lessonTracker.update(currentLandmarks, performance.now(), rawLetterAt);
+        lessonMotionState = res.state;
+        // Holding the base shape is the setup for the gesture, not an answer
+        if (res.emitted === letter) succeedSign(letter);
+        // Show progress as "shape held, now draw it"
+        holdTimer = res.letter === MOTION_LETTERS[letter].base ? HOLD_REQUIRED * 0.4 : 0;
+      } else if (smoothDetected) {
         holdTimer += dt;
         if (holdTimer % 200 < dt) SFX.tick();
         if (holdTimer >= HOLD_REQUIRED) succeedSign(letter);
@@ -707,7 +722,9 @@ function drawLesson() {
       R.rectColor(R.width - 42, 212, 36, 36, '#1a3a2a');
       drawSign(letter, R.width - 40, 214, 32, 32);
       R.textColor(`'${letter}'`, R.width - 24, 250, '#88c070', 6, 'center');
-      R.textColor(getOrientation(letter), R.width - 24, 260, '#555', 3, 'center');
+      // centred at width-30, not width-24: "PALM FACING CAMERA" is 18 chars
+      // and overran the right edge from the old position
+      R.textColor(getOrientation(letter), R.width - 30, 260, '#555', 3, 'center');
 
       // Real-time coaching hints — tell user what to fix
       const feedback = getSignFeedback(currentLandmarks, letter);
@@ -1003,7 +1020,11 @@ function updateSpell(dt) {
 
   // Dev only: advance without a camera, same as the lesson's 'c' bypass
   const forced = import.meta.env?.DEV && keys['c'] ? (keys['c'] = false, expected) : null;
-  const emitted = forced || res.emitted;
+  let emitted = forced || res.emitted;
+  // Holding the base shape of a motion letter is the setup for drawing it, not
+  // a wrong answer — otherwise every J would first be marked as an I.
+  const motion = MOTION_LETTERS[expected];
+  if (motion && emitted === motion.base) emitted = null;
   if (!emitted) return;
 
   if (emitted === expected) {
@@ -1126,6 +1147,7 @@ const CONFUSABLE = {
   F: ['D', 'B', 'O'], I: ['Y', 'A', 'D'], K: ['V', 'U', 'R'], L: ['D', 'Y', 'I'],
   O: ['C', 'A', 'F'], R: ['U', 'V', 'K'], U: ['V', 'R', 'K'], V: ['U', 'R', 'W'],
   W: ['V', 'B', 'U'], Y: ['I', 'L', 'A'],
+  J: ['I', 'Y', 'L'], Z: ['D', 'L', 'I'],
 };
 
 const QUIZ_LEN = 8;

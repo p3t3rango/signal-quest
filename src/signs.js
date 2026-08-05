@@ -378,6 +378,8 @@ export const SIGN_DESCRIPTIONS = {
   V: "Peace sign!\nIndex & middle\nfingers spread",
   W: "Index, middle &\nring fingers\nup and spread",
   Y: "Thumb & pinky\nout, rest curled\n(hang loose!)",
+  J: "Pinky out, then\ndraw a J in\nthe air",
+  Z: "Point your index,\nthen draw a Z\nin the air",
 };
 
 export const ZONES = [

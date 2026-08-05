@@ -10,6 +10,8 @@ export const LESSONS = [
   { id: 3, name: 'Shapes',     subtitle: 'Thumb Work',    signs: ['K', 'L', 'O'], xp: 20 },
   { id: 4, name: 'Angles',     subtitle: 'Cross & Pair',  signs: ['R', 'U', 'V'], xp: 20 },
   { id: 5, name: 'Spread',     subtitle: 'Wide Signs',    signs: ['W', 'Y'],      xp: 25 },
+  // J and Z are drawn in the air rather than held, so they get their own lesson
+  { id: 6, name: 'In Motion',  subtitle: 'Draw The Letter', signs: ['J', 'Z'],    xp: 30 },
 ];
 
 function createDefault() {
