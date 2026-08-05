@@ -4,6 +4,8 @@ import { SFX, playBGM, playStinger, toggleMute, isMuted } from './audio.js';
 import { detectSign, SIGN_DESCRIPTIONS, getHandDebugInfo, getSignFeedback } from './signs.js';
 import { getOrientation, getHandSide, drawHandSign } from './handdraw.js';
 import * as State from './gamestate.js';
+import { SpellTracker } from './motion.js';
+import { pickWord, wordsFor } from './words.js';
 
 // ─── Setup ─────────────────────────────────────────────
 const canvas = document.getElementById('game-canvas');
@@ -216,8 +218,19 @@ function updateHome(dt) {
     btn('continue', 30, y, 100, 22, pendingCheckpoint ? 'REVIEW' : 'CONTINUE', 'primary');
     y += 28;
   }
-  if (homeDueCount) {
+  // Word mode only exists once something is spellable from the letters learned.
+  const canSpell = wordsFor(State.getLearnedSigns()).length > 0;
+  if (homeDueCount && canSpell) {
+    // Share one row rather than adding a fifth — a fifth would run into the hearts.
+    // Short labels: at size 7 anything longer overruns a 48px half-row
+    btn('practice', 30, y, 48, 18, `DUE ${homeDueCount}`, 'secondary');
+    btn('spell', 82, y, 48, 18, 'SPELL', 'secondary');
+    y += 24;
+  } else if (homeDueCount) {
     btn('practice', 30, y, 100, 18, `PRACTICE (${homeDueCount})`, 'secondary');
+    y += 24;
+  } else if (canSpell) {
+    btn('spell', 30, y, 100, 18, 'SPELL WORDS', 'secondary');
     y += 24;
   }
   btn('lessons', 30, y, 100, 18, 'LESSONS', 'secondary');
@@ -235,6 +248,7 @@ function updateHome(dt) {
     const b = hitButton(tap.x, tap.y);
     if (b?.id === 'continue' && (pendingCheckpoint || nextId)) go();
     else if (b?.id === 'practice') { SFX.select(); goTo('quiz', { lessonId: 0, mode: 'practice' }); }
+    else if (b?.id === 'spell') { SFX.select(); goTo('spell'); }
     else if (b?.id === 'lessons') { SFX.select(); goTo('map'); }
     else if (b?.id === 'profile') { SFX.select(); goTo('profile'); }
   }
@@ -919,6 +933,187 @@ function drawProfile() {
   });
 }
 
+// ─── Scene: Spell (word-level fingerspelling) ──────────
+// The lesson scene holds one shape for 1.2s. A word can't work that way, so
+// letters are segmented out of continuous movement by SpellTracker.
+const WORDS_PER_SESSION = 3;
+
+let spellTracker = new SpellTracker();
+let spellWord = '';
+let spellIndex = 0;
+let spellWrong = null;      // letter that was produced instead, for feedback
+let spellWrongTimer = 0;
+let spellDone = 0;          // words completed this session
+let spellMisses = 0;
+let spellPhase = 'spell';   // 'spell' | 'result'
+let spellLast = { shape: 0, travel: 0, state: 'idle' };
+
+// Report whichever letter the hand currently forms. Detectors overlap, so if
+// the expected letter is among the matches prefer it — otherwise a hand that
+// legitimately reads as both would be marked wrong.
+function detectAny(expected) {
+  return lm => {
+    const m = getHandDebugInfo(lm)?.matches || [];
+    if (expected && m.includes(expected)) return expected;
+    return m[0] || null;
+  };
+}
+
+function nextSpellWord() {
+  spellWord = pickWord(State.getLearnedSigns()) || '';
+  spellIndex = 0;
+  spellWrong = null;
+  spellTracker.reset();
+}
+
+function initSpell() {
+  playBGM('lofiFocus');
+  spellDone = 0;
+  spellMisses = 0;
+  spellPhase = 'spell';
+  nextSpellWord();
+  if (!spellWord) spellPhase = 'result';
+}
+
+function updateSpell(dt) {
+  sceneTimer += dt;
+  clearButtons();
+
+  if (spellPhase === 'result') {
+    btn('done', 30, 220, 100, 22, 'CONTINUE', 'primary');
+    const tap = consumeTap();
+    if ((tap && hitButton(tap.x, tap.y)?.id === 'done') || keys['z'] || keys['Enter']) {
+      keys['z'] = false; keys['Enter'] = false;
+      SFX.select(); goTo('home');
+    }
+    return;
+  }
+
+  btn('quit', 4, 22, 36, 12, '< BACK', 'small');
+  const tap = consumeTap();
+  if (tap && hitButton(tap.x, tap.y)?.id === 'quit') { SFX.select(); goTo('home'); return; }
+  if (keys['x']) { keys['x'] = false; SFX.select(); goTo('home'); return; }
+
+  if (spellWrongTimer > 0) spellWrongTimer -= dt;
+  else spellWrong = null;
+
+  const expected = spellWord[spellIndex];
+  const res = spellTracker.update(currentLandmarks, performance.now(), detectAny(expected));
+  spellLast = { shape: res.shape, travel: res.travel, state: res.state };
+
+  // Dev only: advance without a camera, same as the lesson's 'c' bypass
+  const forced = import.meta.env?.DEV && keys['c'] ? (keys['c'] = false, expected) : null;
+  const emitted = forced || res.emitted;
+  if (!emitted) return;
+
+  if (emitted === expected) {
+    SFX.tick();
+    R.flash('#88c070', 90);
+    spellIndex++;
+    if (spellIndex >= spellWord.length) {
+      SFX.success();
+      State.recordPractice(expected, true);
+      spellDone++;
+      if (spellDone >= WORDS_PER_SESSION) {
+        State.addXP(10);
+        SFX.badge();
+        spellPhase = 'result';
+      } else {
+        nextSpellWord();
+      }
+      return;
+    }
+    State.recordPractice(expected, true);
+  } else {
+    SFX.wrong();
+    R.shake(3, 200);
+    spellWrong = emitted;
+    spellWrongTimer = 1200;
+    spellMisses++;
+    State.recordPractice(expected, false);
+  }
+}
+
+function drawSpell() {
+  R.clear(0);
+
+  if (spellPhase === 'result') {
+    const none = !spellWord && spellDone === 0;
+    R.textColor(none ? 'NO WORDS' : 'SPELLING', R.width / 2, 60, '#88c070', 10, 'center');
+    R.textColor(none ? 'YET' : 'DONE!', R.width / 2, 78, '#e0f8d0', 10, 'center');
+    if (none) {
+      R.textColor('LEARN MORE SIGNS', R.width / 2, 120, '#555', 5, 'center');
+      R.textColor('TO UNLOCK WORDS', R.width / 2, 132, '#555', 5, 'center');
+    } else {
+      R.textColor(`${spellDone} WORDS`, R.width / 2, 120, '#88c070', 6, 'center');
+      R.textColor('+10 XP', R.width / 2, 140, '#e8c170', 8, 'center');
+      R.textColor(spellMisses ? `${spellMisses} SLIPS` : 'CLEAN RUN', R.width / 2, 168,
+        spellMisses ? '#ebcb8b' : '#88c070', 5, 'center');
+    }
+    drawButtons();
+    return;
+  }
+
+  // Pulled in from the edge to clear the mute chip at x 142-157
+  R.textColor(`WORD ${spellDone + 1}/${WORDS_PER_SESSION}`, R.width - 26, 10, '#555', 5, 'right');
+  R.textColor('SPELL', 48, 24, '#88c070', 6);
+  drawButtons();
+
+  // The word, with letters committing as they're produced
+  const size = 14, pitch = 16;
+  const startX = R.width / 2 - (spellWord.length - 1) * pitch / 2;
+  [...spellWord].forEach((ch, i) => {
+    const done = i < spellIndex;
+    const active = i === spellIndex;
+    R.textColor(ch, startX + i * pitch, 42,
+      done ? '#88c070' : active ? '#e0f8d0' : '#3a4a44', size, 'center');
+    if (active) R.rectColor(startX + i * pitch - 7, 60, 14, 2, '#e8c170');
+  });
+
+  // Camera
+  const camW = 100, camH = 75, camX = (R.width - camW) / 2, camY = 70;
+  R.rectColor(camX, camY, camW, camH, '#111');
+  R.strokeRect(camX, camY, camW, camH, 1);
+  if (webcamReady && videoEl.readyState >= videoEl.HAVE_ENOUGH_DATA) {
+    R.drawMirrored(videoEl, camX, camY, camW, camH);
+    if (currentLandmarks) {
+      R.drawHandLandmarks(currentLandmarks.map(lm => ({ ...lm, x: 1 - lm.x })),
+        camX, camY, camW, camH, '#88c070');
+    }
+  } else {
+    R.textColor('CAMERA...', R.width / 2, camY + 34, '#333', 6, 'center');
+  }
+
+  // Reference for the letter being asked for
+  const expected = spellWord[spellIndex];
+  if (expected) {
+    R.rectColor(R.width - 40, 152, 34, 34, '#1a3a2a');
+    drawSign(expected, R.width - 38, 154, 30, 30);
+  }
+
+  // Status
+  if (spellWrong) {
+    R.textColor(`THAT'S '${spellWrong}'`, 8, 158, '#e05050', 7);
+    R.textColor(`NEED '${expected}'`, 8, 170, '#ebcb8b', 7);
+  } else if (!handDetected) {
+    R.textColor('SHOW YOUR HAND', 8, 158, '#e05050', 6);
+  } else if (spellLast.state === 'moving') {
+    R.textColor('...', 8, 158, '#555', 7);
+  } else {
+    R.textColor(`SIGN '${expected}'`, 8, 158, '#e0f8d0', 7);
+  }
+
+  // Motion meters — these thresholds are unverified against real hands, so
+  // surface them while spelling rather than hiding them behind the console.
+  if (import.meta.env?.DEV) {
+    R.textColor('SHAPE', 8, 196, '#444', 4);
+    R.progressBarColor(30, 196, 60, 4, spellLast.shape / 0.004, '#1a1a1a', '#346856');
+    R.textColor('TRAVEL', 8, 204, '#444', 4);
+    R.progressBarColor(30, 204, 60, 4, spellLast.travel / 0.004, '#1a1a1a', '#346856');
+    R.textColor(spellLast.state, 96, 200, '#444', 4);
+  }
+}
+
 // ─── Scene: Quiz (receptive practice) ──────────────────
 // The lesson scene trains expressive skill — make the shape, camera confirms.
 // This trains the receptive side: read a shape and name it. In fingerspelling
@@ -1226,9 +1421,9 @@ function quizChoiceState(q, i) {
 }
 
 // ─── Scene Registry ────────────────────────────────────
-const sceneInits = { home: initHome, map: initMap, lesson: initLesson, complete: initComplete, profile: initProfile, quiz: initQuiz };
-const sceneUpdates = { home: updateHome, map: updateMap, lesson: updateLesson, complete: updateComplete, profile: updateProfile, quiz: updateQuiz };
-const sceneDraws = { home: drawHome, map: drawMap, lesson: drawLesson, complete: drawComplete, profile: drawProfile, quiz: drawQuiz };
+const sceneInits = { home: initHome, map: initMap, lesson: initLesson, complete: initComplete, profile: initProfile, quiz: initQuiz, spell: initSpell };
+const sceneUpdates = { home: updateHome, map: updateMap, lesson: updateLesson, complete: updateComplete, profile: updateProfile, quiz: updateQuiz, spell: updateSpell };
+const sceneDraws = { home: drawHome, map: drawMap, lesson: drawLesson, complete: drawComplete, profile: drawProfile, quiz: drawQuiz, spell: drawSpell };
 
 // ─── Music toggle (global, all scenes) ─────────────────
 // Hit area is deliberately larger than the 7x7 icon — it has to be thumb-sized
