@@ -964,6 +964,15 @@ let spellDone = 0;          // words completed this session
 let spellMisses = 0;
 let spellPhase = 'spell';   // 'spell' | 'result'
 let spellLast = { shape: 0, travel: 0, state: 'idle' };
+let spellCooldown = 0;      // ignore emissions briefly after a mistake
+let spellOkFlash = 0;       // per-letter confirmation, local instead of full-screen
+let spellMsg = '';          // held for a minimum time so it can't strobe
+let spellMsgTimer = 0;
+let spellSmoothed = null;   // display-only landmark smoothing
+
+const SPELL_COOLDOWN_MS = 900;   // after a wrong letter
+const SPELL_MSG_MIN_MS = 500;    // minimum time a status line stays put
+const SPELL_SMOOTHING = 0.45;    // 0 = frozen, 1 = raw
 
 // Report whichever letter the hand currently forms. Detectors overlap, so if
 // the expected letter is among the matches prefer it — otherwise a hand that
@@ -980,6 +989,7 @@ function nextSpellWord() {
   spellWord = pickWord(State.getLearnedSigns()) || '';
   spellIndex = 0;
   spellWrong = null;
+  spellCooldown = 0;
   spellTracker.reset();
 }
 
@@ -1013,6 +1023,23 @@ function updateSpell(dt) {
 
   if (spellWrongTimer > 0) spellWrongTimer -= dt;
   else spellWrong = null;
+  if (spellCooldown > 0) spellCooldown -= dt;
+  if (spellOkFlash > 0) spellOkFlash -= dt;
+  if (spellMsgTimer > 0) spellMsgTimer -= dt;
+
+  // Smooth the landmarks used for DRAWING only. The raw points jitter frame to
+  // frame, and a twitching skeleton over a live camera is genuinely unpleasant
+  // to look at. Detection still runs on the raw values so behaviour is unchanged.
+  if (currentLandmarks) {
+    spellSmoothed = spellSmoothed && spellSmoothed.length === currentLandmarks.length
+      ? currentLandmarks.map((p, i) => ({
+          x: spellSmoothed[i].x + (p.x - spellSmoothed[i].x) * SPELL_SMOOTHING,
+          y: spellSmoothed[i].y + (p.y - spellSmoothed[i].y) * SPELL_SMOOTHING,
+        }))
+      : currentLandmarks.map(p => ({ x: p.x, y: p.y }));
+  } else {
+    spellSmoothed = null;
+  }
 
   const expected = spellWord[spellIndex];
   const res = spellTracker.update(currentLandmarks, performance.now(), detectAny(expected));
@@ -1025,11 +1052,15 @@ function updateSpell(dt) {
   // a wrong answer — otherwise every J would first be marked as an I.
   const motion = MOTION_LETTERS[expected];
   if (motion && emitted === motion.base) emitted = null;
+  // Swallow everything briefly after a mistake. Without this, a hand resting
+  // near a wrong shape re-emits every time it drifts and re-settles, so one
+  // fumble turns into a stream of buzzes and screen shakes.
+  if (spellCooldown > 0) emitted = null;
   if (!emitted) return;
 
   if (emitted === expected) {
     SFX.tick();
-    R.flash('#88c070', 90);
+    spellOkFlash = 220;      // localised tick, not a full-screen flash
     spellIndex++;
     if (spellIndex >= spellWord.length) {
       SFX.success();
@@ -1047,9 +1078,12 @@ function updateSpell(dt) {
     State.recordPractice(expected, true);
   } else {
     SFX.wrong();
-    R.shake(3, 200);
+    // No screen shake here. Spelling produces far more wrong reads than a
+    // single-letter lesson does, and shaking the whole screen each time is what
+    // made this physically unpleasant. The camera border turns red instead.
     spellWrong = emitted;
     spellWrongTimer = 1200;
+    spellCooldown = SPELL_COOLDOWN_MS;
     spellMisses++;
     State.recordPractice(expected, false);
   }
@@ -1094,16 +1128,18 @@ function drawSpell() {
   // Camera
   const camW = 100, camH = 75, camX = (R.width - camW) / 2, camY = 70;
   R.rectColor(camX, camY, camW, camH, '#111');
-  R.strokeRect(camX, camY, camW, camH, 1);
   if (webcamReady && videoEl.readyState >= videoEl.HAVE_ENOUGH_DATA) {
     R.drawMirrored(videoEl, camX, camY, camW, camH);
-    if (currentLandmarks) {
-      R.drawHandLandmarks(currentLandmarks.map(lm => ({ ...lm, x: 1 - lm.x })),
+    if (spellSmoothed) {
+      R.drawHandLandmarks(spellSmoothed.map(lm => ({ ...lm, x: 1 - lm.x })),
         camX, camY, camW, camH, '#88c070');
     }
   } else {
     R.textColor('CAMERA...', R.width / 2, camY + 34, '#333', 6, 'center');
   }
+  // Border carries the feedback that used to be a screen shake or a full flash
+  R.strokeRectColor(camX, camY, camW, camH,
+    spellWrong ? '#e05050' : spellOkFlash > 0 ? '#88c070' : '#346856');
 
   // Reference for the letter being asked for
   const expected = spellWord[spellIndex];
@@ -1116,12 +1152,14 @@ function drawSpell() {
   if (spellWrong) {
     R.textColor(`THAT'S '${spellWrong}'`, 8, 158, '#e05050', 7);
     R.textColor(`NEED '${expected}'`, 8, 170, '#ebcb8b', 7);
-  } else if (!handDetected) {
-    R.textColor('SHOW YOUR HAND', 8, 158, '#e05050', 6);
-  } else if (spellLast.state === 'moving') {
-    R.textColor('...', 8, 158, '#555', 7);
   } else {
-    R.textColor(`SIGN '${expected}'`, 8, 158, '#e0f8d0', 7);
+    // The tracker flips between moving and settled several times a second.
+    // Rendering that directly made the status line strobe, so a message has to
+    // stand for a minimum time before a different one can replace it.
+    const want = !handDetected ? 'SHOW YOUR HAND' : `SIGN '${expected}'`;
+    if (want !== spellMsg && spellMsgTimer <= 0) { spellMsg = want; spellMsgTimer = SPELL_MSG_MIN_MS; }
+    if (!spellMsg) spellMsg = want;
+    R.textColor(spellMsg, 8, 158, spellMsg.startsWith('SHOW') ? '#e05050' : '#e0f8d0', 7);
   }
 
   // Motion meters — these thresholds are unverified against real hands, so

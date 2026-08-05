@@ -40,7 +40,10 @@ export const MOTION_TUNING = {
   // J as stationary, so it never registered as a gesture at all.
   settleTravel: 0.0005,  // above hand tremor (~0.0003), below the slowest gesture
   moveTravel: 0.0009,    // catches a slow, small J; a doubled-letter bounce is ~0.0015
-  settleFrames: 4,       // consecutive settled frames on the same letter
+  // ~230ms at 30fps. At 4 frames (130ms) a hand merely passing through a shape
+  // on the way to another one committed it as a letter, which in spelling means
+  // a stream of wrong answers mid-transition.
+  settleFrames: 7,       // consecutive settled frames on the same letter
 };
 
 function handScaleOf(lm) {
