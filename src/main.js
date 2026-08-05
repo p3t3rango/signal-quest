@@ -30,7 +30,12 @@ function fitContain(srcW, srcH, x, y, w, h) {
 // Draw a sign reference. Prefers the SVG photo-trace, but several of the shipped
 // SVGs are actually saved error pages that fail to decode — so fall back to the
 // procedural hand in handdraw.js rather than leaving an empty box.
-function drawSign(letter, x, y, w, h, { flipped = true, alpha = 1 } = {}) {
+// The reference art is all RIGHT hands, and the camera is mirrored. A
+// right-hander's right hand appears mirrored, so the reference is flipped to
+// match. A left-hander's left hand appears the other way round, so it must not
+// be — otherwise every reference is the wrong chirality for them.
+function drawSign(letter, x, y, w, h, { flipped = null, alpha = 1 } = {}) {
+  if (flipped === null) flipped = State.getHandedness() === 'right';
   const img = signImages[letter];
   // The source traces aren't square — most are roughly 1:2 portrait and Y is
   // landscape — so fit them inside the box instead of stretching to fill it.
@@ -626,7 +631,8 @@ function drawLesson() {
       drawSign(letter, imgX, imgY, imgSize, imgSize);
 
       // Orientation
-      R.textColor(getHandSide(letter), R.width / 2, 158, '#ebcb8b', 5, 'center');
+      R.textColor(State.getHandedness() === 'left' ? 'LEFT HAND' : getHandSide(letter),
+        R.width / 2, 158, '#ebcb8b', 5, 'center');
       R.textColor('MIRROR VIEW', R.width / 2, 168, '#555', 5, 'center');
 
       // Description (typewriter)
@@ -846,11 +852,16 @@ function updateProfile(dt) {
   sceneTimer += dt;
   clearButtons();
   btn('back', 4, 4, 40, 14, '< BACK', 'small');
+  // Sits in the gap between the stats block and its divider. The bottom of this
+  // screen isn't free — the lesson list already runs past the canvas height.
+  btn('hand', 14, 103, 132, 14,
+    `HAND: ${State.getHandedness() === 'left' ? 'LEFT' : 'RIGHT'}`, 'secondary');
 
   const tap = consumeTap();
   if (tap) {
     const b = hitButton(tap.x, tap.y);
     if (b?.id === 'back') { SFX.select(); goTo('home'); }
+    else if (b?.id === 'hand') { SFX.select(); State.toggleHandedness(); }
   }
   if (keys['x'] || keys['Escape']) { keys['x'] = false; keys['Escape'] = false; SFX.select(); goTo('home'); }
 }
@@ -867,10 +878,11 @@ function drawProfile() {
   R.textColor('STATS', R.width / 2, 32, '#88c070', 7, 'center');
   R.rect(10, 44, R.width - 20, 2, 1);
 
-  R.textColor(`XP: ${st.xp}`, 16, 55, '#ebcb8b', 7);
-  R.textColor(`STREAK: ${st.streak}`, 16, 70, '#e8c170', 7);
-  R.textColor(`LESSONS: ${st.completedLessons.length}/${State.getTotalLessons()}`, 16, 85, '#88c070', 7);
-  R.textColor(`SIGNS: ${st.masteredSigns.length}/14`, 16, 100, '#88c070', 7);
+  // 12px rows rather than 15, to free a clean band for the HAND toggle at 101
+  R.textColor(`XP: ${st.xp}`, 16, 54, '#ebcb8b', 7);
+  R.textColor(`STREAK: ${st.streak}`, 16, 66, '#e8c170', 7);
+  R.textColor(`LESSONS: ${st.completedLessons.length}/${State.getTotalLessons()}`, 16, 78, '#88c070', 7);
+  R.textColor(`SIGNS: ${st.masteredSigns.length}/14`, 16, 90, '#88c070', 7);
 
   // Mastered signs grid
   R.rect(10, 118, R.width - 20, 2, 1);

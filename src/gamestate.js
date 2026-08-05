@@ -30,6 +30,11 @@ function createDefault() {
     // which stays a permanent "have I ever learned this" set for the map and
     // the signs-mastered count.
     signStrength: {},
+    // 'right' | 'left' — which hand the learner signs with. Affects presentation
+    // only: the detectors are handedness-invariant (verified by mirroring
+    // landmarks), but the reference art is all right hands and has to be
+    // flipped the correct way to match a mirrored camera.
+    handedness: 'right',
     schemaVersion: SCHEMA_VERSION,
   };
 }
@@ -147,6 +152,15 @@ export function recordQuizAnswer(letter, correct) {
   if (correct) s.correct++;
   state.quizStats[letter] = s;
   saveState();
+}
+
+// ─── Handedness ───
+export function getHandedness() { return state.handedness === 'left' ? 'left' : 'right'; }
+
+export function toggleHandedness() {
+  state.handedness = getHandedness() === 'right' ? 'left' : 'right';
+  saveState();
+  return state.handedness;
 }
 
 // ─── Memory strength (spaced repetition) ───
