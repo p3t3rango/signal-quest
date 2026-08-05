@@ -12,11 +12,35 @@
 // ─── Finger state helpers ──────────────────────────────
 // These use relative comparisons scaled to hand size for robustness
 
+const FINGER_IDS = {
+  index: [5, 6, 7, 8], middle: [9, 10, 11, 12], ring: [13, 14, 15, 16], pinky: [17, 18, 19, 20],
+};
+
+const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+
 function handScale(landmarks) {
   // Distance from wrist to middle MCP as a reference unit
   const wrist = landmarks[0];
   const midMCP = landmarks[9];
   return Math.hypot(wrist.x - midMCP.x, wrist.y - midMCP.y) || 0.15;
+}
+
+// How straight a finger is: tip-to-knuckle distance over the length of the
+// finger itself. ~1.0 straight, ~0.8 gently curved, ~0.5 fisted.
+//
+// Every other test here scales thresholds by handScale, which measures the
+// PALM — but finger-length-to-palm-length varies a lot between people, so a
+// palm-derived margin is a moving target on finger geometry. Someone with
+// shorter fingers has less tip-to-PIP separation and fails a margin that was
+// implicitly tuned on longer ones. Normalising by the finger's own length
+// removes that dependency entirely.
+function fingerStraightness(landmarks, finger) {
+  const ids = FINGER_IDS[finger];
+  if (!ids) return 0;
+  const pts = ids.map(i => landmarks[i]);
+  let chain = 0;
+  for (let i = 1; i < pts.length; i++) chain += dist(pts[i - 1], pts[i]);
+  return chain ? dist(pts[0], pts[3]) / chain : 0;
 }
 
 function isFingerExtended(landmarks, finger) {
@@ -142,15 +166,19 @@ const SIGN_DETECTORS = {
     return allFingersExtended(lm) && fingersTogether(lm);
   },
   C: (lm) => {
-    // Curved hand — fingers together, slightly curved, thumb out
-    const indexTip = lm[8];
-    const pinkyTip = lm[20];
-    const spread = Math.abs(indexTip.x - pinkyTip.x);
-    const hs = handScale(lm);
-    return isFingerExtended(lm, 'index') &&
-           isFingerExtended(lm, 'middle') &&
-           spread < hs * 0.6 &&
-           isThumbExtended(lm);
+    // A C is a CURVED hand — the fingers arc toward the thumb to form the
+    // opening. It used to require isFingerExtended, which asks "is the tip
+    // above the PIP", and a curved finger barely clears that. Worse, the
+    // margin scaled with palm size, so a correctly-formed C with shorter
+    // fingers failed outright.
+    //
+    // Judge the curl by each finger's own straightness instead, and identify
+    // the C by its defining feature: a gap between thumb and index that's
+    // open (unlike O, where they touch) but not flat open (unlike B).
+    const curved = ['index', 'middle', 'ring']
+      .every(f => { const s = fingerStraightness(lm, f); return s > 0.55 && s < 0.99; });
+    const gap = dist(lm[4], lm[8]) / handScale(lm);
+    return curved && gap > 0.35 && gap < 1.15 && fingersTogether(lm);
   },
   D: (lm) => {
     // Index up, others curled
@@ -288,7 +316,7 @@ const SIGN_EXPECTATIONS = {
   // tuck while the sign is already accepted just reads as broken. The written
   // description still teaches the thumb position.
   B: { index: 'extended', middle: 'extended', ring: 'extended', pinky: 'extended', thumb: 'any', together: true },
-  C: { index: 'extended', middle: 'extended', ring: 'any', pinky: 'any', thumb: 'extended' },
+  C: { index: 'curved', middle: 'curved', ring: 'curved', pinky: 'any', thumb: 'any', together: true },
   D: { index: 'extended', middle: 'curled', ring: 'curled', pinky: 'curled', thumb: 'any' },
   F: { index: 'curled', middle: 'extended', ring: 'extended', pinky: 'extended', thumb: 'any' },
   I: { index: 'curled', middle: 'curled', ring: 'curled', pinky: 'extended', thumb: 'any' },
@@ -315,6 +343,11 @@ export function getSignFeedback(landmarks, targetLetter) {
       hints.push(`RAISE ${FINGER_NAMES[finger]}`);
     } else if (expect[finger] === 'curled' && !isFingerCurled(landmarks, finger)) {
       hints.push(`CURL ${FINGER_NAMES[finger]}`);
+    } else if (expect[finger] === 'curved') {
+      // A C wants an arc — too straight and too fisted are different mistakes
+      const st = fingerStraightness(landmarks, finger);
+      if (st >= 0.99) hints.push(`CURVE ${FINGER_NAMES[finger]}`);
+      else if (st <= 0.55) hints.push(`OPEN ${FINGER_NAMES[finger]}`);
     }
   }
   if (expect.thumb === 'extended' && !isThumbExtended(landmarks)) {
